@@ -12,9 +12,45 @@ export function takeToken(loc: Location = location): string | null {
   const t = new URLSearchParams(loc.hash.slice(1)).get("token") ?? new URLSearchParams(loc.search).get("token");
   if (t) {
     sessionStorage.setItem(TOKEN_KEY, t);
-    history.replaceState(null, "", loc.pathname);
+    history.replaceState(null, "", withoutToken(loc));
   }
   return t ?? sessionStorage.getItem(TOKEN_KEY);
+}
+
+/**
+ * The same address **without the token** — the credential goes, everything else stays (T-1042).
+ *
+ * It used to be `loc.pathname`, which also threw away the **query string**, so a client flag
+ * (`?live-ring=1`, `src/flags.ts`) was gone from `location.search` before anything could read it and
+ * silently did nothing. The token is the one thing that may not stay in the address bar; a flag is
+ * the opposite — it is *meant* to be visible and to survive a reload, which is why the flags are
+ * query parameters at all.
+ */
+export function withoutToken(loc: Pick<Location, "pathname" | "search">): string {
+  const q = new URLSearchParams(loc.search);
+  q.delete("token");
+  const rest = q.toString();
+  return rest ? `${loc.pathname}?${rest}` : loc.pathname;
+}
+
+/**
+ * T-955: **a `#token=` navigation to this page is not a reload.** `takeToken` strips the hash, so the
+ * address bar reads `/`, and navigating to `/#token=…` from there is a same-document fragment change:
+ * no script re-runs, and the page keeps whatever it held — the explorer's "reloaded" page kept its
+ * 162.2 MHz Go-to view and retune offer across a server restart and two retunes (shots 0428), and a
+ * page stuck on "token needed" stayed stuck after being handed a token. So a token arriving in the
+ * fragment is stored and the page genuinely reloads, booting exactly as a fresh open would.
+ */
+export function reloadOnTokenHash(
+  win: { addEventListener(t: "hashchange", fn: () => void): void; location: { hash: string; reload(): void } },
+  store: Pick<Storage, "setItem">,
+): void {
+  win.addEventListener("hashchange", () => {
+    const t = new URLSearchParams(win.location.hash.slice(1)).get("token");
+    if (!t) return;
+    store.setItem(TOKEN_KEY, t);
+    win.location.reload();
+  });
 }
 
 export function storeToken(t: string) { sessionStorage.setItem(TOKEN_KEY, t); }

@@ -147,7 +147,25 @@ export function decodeSurvey(resp: SurveyResponse): Survey | null {
   const oldest = finite(h?.oldest_record_s) ? h!.oldest_record_s! : null;
   // Rule 3a: the survey must reach back to when recording began, or rows the shadow could come
   // from are outside it. `null` began is "nothing here ever recorded": then no past is missing.
-  const complete = began === null || t0 <= began + 1e-9;
+  //
+  // **T-982: the epsilon must scale with the timestamp, not be a flat 1e-9 SECONDS (1 ns).** `t0`
+  // and `began` are Unix epoch seconds (~1.79e9), carried on the client as `SurfaceOrigin.edgeNs`
+  // in NANOSECONDS — a plain JS `number`, so `~1.79e18` ns already exceeds `Number.MAX_SAFE_INTEGER`
+  // (2^53 ≈ 9.007e15) by ~200x, and `maybeSurvey`'s own `t0Ns / S_TO_NS -> ...server... -> floorNs`
+  // round trip (`preview.ts`) re-derives this exact `t0` from that representation on every retry.
+  // Measured live (T-982, a second tab opening `/surface.html` while `/` already runs against the
+  // same mock capture): `t0` and `began` came back **~200 ns apart** — description of the same
+  // instant, corrupted by exactly the ns-as-float64 precision this file's own comment three lines
+  // up does not anticipate. A flat 1 ns tolerance is over two orders of magnitude tighter than that
+  // unavoidable loss, so `complete` read `false` FOREVER: same frozen `t0`/`began` every retry (a
+  // historical surface's bounds never move), same false verdict every time, `setSurvey` never
+  // called, and T-580's "coverage first" gate then refuses every tile forever — the exact
+  // "0 tiles · N pending" that never resolves. `tilecache.ts`'s `closeEnough` already holds this
+  // codebase's answer for a float64 timestamp compare: RELATIVE to magnitude, not a bare constant.
+  // The same `1e-9` now scales with `began` (~1.8 s of slack at this magnitude) — nine orders of
+  // magnitude past the measured 200 ns error, and still four orders tighter than the seconds-scale
+  // gaps this rule exists to catch.
+  const complete = began === null || t0 <= began + 1e-9 * Math.max(1, Math.abs(began));
   // Rule 3b: a row straddling the record horizon while records were LOST is partly a row the server
   // no longer has records for, and its cells can read "unobserved" over that part. It blocks.
   const lost = h?.forgotten != null || (began !== null && oldest !== null && oldest > began);

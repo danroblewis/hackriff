@@ -201,11 +201,12 @@ So "3 frames" was correct for exactly one row of that table and was being applie
 Two conditions replace the flat `width ≥ 16`:
 
 ```rust
-min_check_width: u16 = 16         // T-577, measured; 8 only with §4.3.1's count
+min_check_width: u16 = 16         // T-577 measured it; T-921 re-measured it on the shipped
+                                  // count and it STAYS at 16 (§4.3.2)
 hard_check_floor_bits: f32 = 16.0 // at least this much of the 24 comes from a check stage
 ```
 
-**The floor of 8 is not derived from the budget, and this ADR will not pretend otherwise.** The budget constrains a *rate*, and §4.2's inequality already converts any width into the frame count that meets it — arithmetically, width 4 with 7 differences is the same 28 bits as width 16 with 2. What the budget cannot see is a **degenerate null**: below about a byte, a check can be satisfied by a framing artefact rather than by a code, the `differences` guard has too little to work with, and the per-frame independence assumption (§3.2) degrades fastest. 8 was a judgement that a byte is the smallest unit where the accounting still means something. T-577 measured it against ADR-0021's N2/N3 populations and three synthetic framing artefacts, and the number moved **up**; see §4.3.1.
+**The floor of 8 is not derived from the budget, and this ADR will not pretend otherwise.** The budget constrains a *rate*, and §4.2's inequality already converts any width into the frame count that meets it — arithmetically, width 4 with 7 differences is the same 28 bits as width 16 with 2. What the budget cannot see is a **degenerate null**: below about a byte, a check can be satisfied by a framing artefact rather than by a code, the `differences` guard has too little to work with, and the per-frame independence assumption (§3.2) degrades fastest. 8 was a judgement that a byte is the smallest unit where the accounting still means something. T-577 measured it against ADR-0021's N2/N3 populations and three synthetic framing artefacts, and the number moved **up** (§4.3.1). T-921 then re-measured it against the count that actually shipped, and it **stays at 16** (§4.3.2).
 
 #### 4.3.1 Measured (T-577)
 
@@ -217,16 +218,58 @@ Source: [docs/results/T-577.md](../results/T-577.md), harness `hk-estimate/tests
 
 **The count change.** A valid frame adds a trial only if two things hold:
 
-1. It is not degenerate: it is not short-periodic even with up to *w* bits trimmed from either end. This closes (A).
+1. It is not degenerate: it is not short-periodic even with up to *w* bits trimmed from either end. This closes (A). The test is applied to **the bits the check covers** — `frame[span.start_bit .. len − end_trim_bits]`, one BCH word, the parity units — never to the frame they were cut from: with `start_bit > 0` the cancelling `init` starts at `start_bit`, so a frame whose *covered* span is idle is not short-periodic under any trim of the whole frame, and (A) returns (measured on the real block: one such frame counted, at w = 32 — T-928, re-modelled in the harness with `start_bit = 8`).
 2. Its zero-trimmed polynomial is not a multiple (or divisor) of one already counted, because m·P is valid by construction once P is. This closes (B), including frames that hold two copies of one burst.
 
-The count is then capped at the GF(2) **affine rank + 1** of the valid frames. That is where independence actually saturates: at the payload's varying-bit dimension (a slow sensor ≈ 7, a counter log₂k + 2, a squitter 41), not at a frame count. With this count, every N2/N3 and artefact cell reads 0 of 4000 at w = 8, except (C) at w = 4. It costs the five real-emitter models nothing: it equals `differences` at every k.
+The count is then capped at the GF(2) **affine rank + 1** of the valid frames. That is where independence actually saturates: at the payload's varying-bit dimension (a slow sensor ≈ 7, a counter log₂k + 2, a squitter 41), not at a frame count. With this count, every N2/N3 and artefact cell reads 0 of 4000 at w = 8, except (C) at w = 4.
 
-**So:** `min_check_width = 16` while `differences` is the `CheckTally` count. It returns to **8** only when the count above ships, re-measured by the same harness. It never goes below 8. (A) and the searched half of (B) need the count change **whatever the floor**, and T-575 carries both. `distinct_valid` versus `differences` (T-575's swap) measured a gap of **0** on every real emitter. The swap's value is on the null side: the short-period guard takes N2 at w = 24/32 from 44–48 % to 0.
+~~It costs the five real-emitter models nothing: it equals `differences` at every k.~~ **Corrected by T-921** ([docs/results/T-921.md](../results/T-921.md) §5), which measured the shipped count rather than a copy of the dedup rule without the cap: the count equals `differences` on an emitter whose payload does not repeat (a squitter below k = 64), and equals the **affine rank + 1 — materially fewer** — on one that does (a rolling counter 7.9 against 128 `differences` at k = 128; a slow sensor 7.4 against 17.3). That is the cap working, and every one of the five still meets §4.2's requirement at its own width from few frames. `distinct_valid` versus `differences` is still a gap of 0.0, so T-575's swap still costs a real emitter nothing.
+
+**So:** `min_check_width = 16` while `differences` is the `CheckTally` count. It returns to **8** only when the count above ships, re-measured by the same harness. It never goes below 8. (A) and the searched half of (B) need the count change **whatever the floor**, and T-575 carries both. *(The count shipped — T-575, T-928 — and the re-measurement is §4.3.2: the answer is 16.)* `distinct_valid` versus `differences` (T-575's swap) measured a gap of **0** on every real emitter. The swap's value is on the null side: the short-period guard takes N2 at w = 24/32 from 44–48 % to 0.
 
 **The hard check floor is derived**, from what a confirmation claims. Confirm-by-decode says *this was decoded*. Sync excess has the weakest independence assumptions of the three analytic nulls (a periodic signal repeats its own patterns), and a result carrying 24 bits of sync excess and no check has not decoded anything. So at least 16 of the 24 bits must come from a `check_distinct_valid` contribution. Lowering the width floor to 8 without this would let a sync-only result through the door the width floor was informally holding shut.
 
 **What the chance-factor confidence does *not* gate.** `assist::codes`' confidence (0.1 at 3 frames, 0.95 at 8) prices *which generator* was found, not *whether the frames check out*. A chance multiple of the true generator still means real structure with a real check: the emitter is real, the *identity* is uncertain. So it gates the **label**, under ADR-0021's budget, and not the confirm. This is the same separation ADR-0021 §7A.5 already makes — a Confirmed emitter with no identity at all is a legal, intended state — and it is why a `structured-unidentified` result may confirm.
+
+#### 4.3.2 Re-measured on the shipped count (T-921) — the floor stays at 16
+
+Source: [docs/results/T-921.md](../results/T-921.md), the same harness, now driving the **real**
+`CheckTally` (`hk_model::synth::tally`) rather than a copy of the count, and with
+`assist::codes` counting its own search cells with it. §4.3.1's condition for returning to 8 is
+therefore discharged, and the answer is **no**.
+
+- **The count did what it was written to do.** (A) init-cancel on N2 at w = 24/32 went
+  1.98e-2 / 2.03e-2 → **0 of 4000**; (B) the template shift artefact went 1.00 → **0 of 4000**
+  at every width ≤ 24; and the **searched** half of (B) — the one §5.3's null control cannot
+  see — went 0.20–0.31 → **0 of 100** at every width, once the searched path was put on the
+  count. Every other population cell is 0 of 4000 at every width. The two nonzero cells left are
+  (C) at w = 4 and a single valid frame under a w ≥ 24 check, which is what §4.2 asks of it
+  (realised 2.3e-10 at w = 32).
+- **A third artefact decides the floor: the burst pair.** §4.3.1's dedup covers **one** already
+  counted burst. A frame holding two *different* counted bursts, `x^a·A + x^b·B`, is divisible
+  by `g` whenever both are — valid by construction, a multiple of neither, and outside the
+  affine-rank cap because the three frames are linearly independent. Conditionally it clears the
+  gate at **every width from 8** (1.00 anchored, 0.94–0.96 searched). Its prior is
+  `C(M, 2)·2^(−2w)` for an emitter with `M` distinct messages, so the realised rate at w = 8 is
+  **1.5e-5 for M = 2 (0.31 × the budget), 9.2e-5 for M = 4 (1.8 ×), 4.2e-3 for M = 24 (84 ×)**,
+  against **6.4e-8 at w = 16 for M = 24 (0.0013 ×)**. The budget is crossed between w = 12 and
+  w = 8. A 902–928 MHz window is the multi-message column.
+- **And the searched half has no power at 8 anyway.** A zero row over the 100 searched windows a
+  cell can afford bounds it at 3.0e-2, which against the `2^−w` prior is 1.2e-4 at w = 8 —
+  *above* the budget — and 4.6e-7 at w = 16. This run could not certify 8 even where it saw
+  nothing.
+- **Two further holes were found and closed** (both width-independent, so neither is a floor
+  argument): an **idle tail of ≤ 16 bits**, which `is_short_periodic` refuses to look at, so no
+  trim of `1^8 ‖ 0^16` was ever tested and (A) returned at every w ≤ 16 — the guard now also
+  refuses a span that repeats with two whole periods at any length; and a **cancelling prefix
+  wider than the register**, where a sum-type checksum with `unit_bits > width` left most of the
+  cancelling unit inside the span — `checksum` now trims `max(width, unit_bits)` and `parity`
+  trims `unit`.
+
+**So: 16, now measured against the count that ships.** The floor may be re-opened if the burst
+pair is closed — [docs/results/T-921.md](../results/T-921.md) §6 records a candidate rule and
+why the obvious generalisation of it is wrong — and re-measured with enough searched windows to
+bound the searched path below 5 × 10⁻⁵. It never goes below 8.
 
 ---
 
@@ -338,7 +381,7 @@ T-547 measures whether the calibrated nulls (bimodality, eye openness, EVM, SNR 
 
 **What does not change, under any of the three outcomes:**
 
-- `min_analytic_holdout_bits = 24`, `hard_check_floor_bits = 16`, `min_check_width = 8`, and §4.2's formula. None of them reads a calibrated metric.
+- `min_analytic_holdout_bits = 24`, `hard_check_floor_bits = 16`, `min_check_width = 16` (§4.3: T-577 measured it; 8 only once §4.3.1's count is re-measured by that harness, never below 8), and §4.2's formula. None of them reads a calibrated metric.
 - The margin `M = 9.7 bits`. It prices the *analytic* nulls' assumptions (§3.2), which T-547 does not measure. §10.2 moves `M`; T-547 does not.
 - The soundness of the budget argument. This is the point of §2: the derivation was built so that a NO-GO is survivable without a redesign.
 
@@ -438,7 +481,7 @@ A reader of that knows which assumption broke, by how much, and which fixture to
 
 ### 11.1 ADR-0015
 
-- **§5.5** — conditions 1–3 replaced by §6's gate; `min_evidence_bits` and `min_distinct_valid` deleted; `min_check_width` 16 → 8 with `hard_check_floor_bits`; condition 4 (front-end trust) unchanged; the actor becomes `hk-pipeline/confirm-synth@2`. The "single frames don't auto-confirm" sentence and §10 open question 1 are **settled** by §4.2 + docs/20 §U1.
+- **§5.5** — conditions 1–3 replaced by §6's gate; `min_evidence_bits` and `min_distinct_valid` deleted; the flat `min_check_width = 16` replaced by `hard_check_floor_bits` plus a **measured** width floor (§4.3: 16, measured by T-577 and re-measured on the shipped count by T-921 — §4.3.2); condition 4 (front-end trust) unchanged; the actor becomes `hk-pipeline/confirm-synth@2`. The "single frames don't auto-confirm" sentence and §10 open question 1 are **settled** by §4.2 + docs/20 §U1.
 - **§11.5** — the restated thresholds updated to match; "no rule demotes", the T-210 corrected-frame invariant and the one-promoted-row rule unchanged.
 - **§1.3** — a note that `evidence_bits` remains the search-order and result-rank key and is **not** the confirm key; `analytic_holdout_bits` is added beside it.
 - One pointer line added in this branch; the full rewrite belongs to **T-575**.

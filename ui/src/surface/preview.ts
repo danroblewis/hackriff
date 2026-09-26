@@ -33,17 +33,18 @@
 
 import { ControlError } from "../controls/client";
 import {
-  coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
+  coverageUrl, observedExtent, openingWindow, orientationNote, recentObservedExtent, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { batchedTileSource } from "./tilebatch";
 import { oneTier, tileUrl, type Box, type Lattice, type LatticeSet, type TileAddr } from "./lattice";
-import type { RowActionFor, WidthActionsFor } from "./chrome";
+import type { RowActionFor, RowDeviceFor, StatusFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
+import type { RingFrame } from "./livering";
 import { LiveRowFeeds, type RowOpener } from "./rowfeed";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
@@ -51,6 +52,8 @@ import {
   type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
 } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
+import { activeAfterClose } from "./panes";
+import type { HudReserve } from "./hud";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
  * budget in `tilecache.ts` was measured against. */
@@ -248,28 +251,40 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   }
 
   const census = observedExtent(cov);
+  // T-955: **frequency from what is observed NOW, time from everything observed.** A session that
+  // tuned to one band for an hour and retuned since holds both bands in one record horizon, and
+  // `census.box` — a bounding rectangle over every observed cell ever — spans the gap between them
+  // (measured live: a page opening on "100–1100 MHz × 1.6 h" with the tuned band a sliver). So the
+  // FREQUENCY the view opens on is the band observed in the newest observed rows
+  // (`recentObservedExtent`, anchored at the newest OBSERVED row, never the grid's end: a server's
+  // `latest_s` was seen 34 min in the future). The TIME it opens on stays the whole census's — the
+  // recent box is a few rows by construction, and opening on its time would cut an hour of history to
+  // two minutes (the regression the first T-955 pass shipped).
+  const recent = recentObservedExtent(cov);
   // **One refinement pass, measured rather than assumed.** A 128-cell map of a 6.5 GHz surface has
   // 51.2 MHz cells, so the coarse box around a 2.4 MHz capture is ~20x too wide — measured on a
   // replay: 0.78 % observed, and the observed box came back as 51.2–102.4 MHz for a recording that
   // spans 99.6–102 MHz. Opening there would put the capture in a twentieth of the pane's width and
-  // read as "still nothing here". Asking the *same route* again over the box it just returned costs
-  // one request and is the same question at the resolution the answer made available.
-  let refined = census;
-  if (census.box) {
+  // read as "still nothing here". Asking the *same route* again over the recent box costs one
+  // request and is the same question at the resolution the answer made available — in time too, so
+  // its newest observed row (an eighth of a coarse row) separates a retune seconds old from the band
+  // the radio just left, which a coarse row of a long history straddles.
+  let freqBox: Box | null = recent.box;
+  if (recent.box) {
     try {
-      fine = (await ask(coverageUrl(census.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
-      refined = observedExtent(fine);
+      fine = (await ask(coverageUrl(recent.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
+      // A refinement that found nothing is not evidence against the coarse answer — the coarse cell
+      // was observed, so something is in there. Keep the wider box rather than opening on nowhere.
+      freqBox = recentObservedExtent(fine, 1).box ?? recent.box;
     } catch (e) {
       degraded.push(`the coverage refinement pass failed (${describe(e)}): the view opens on the coarse observed box, which may be much wider than what was actually sampled.`);
-      refined = census;
     }
-    // A refinement that found nothing is not evidence against the coarse answer — the coarse cell
-    // was observed, so something is in there. Keep the wider box rather than opening on nowhere.
-    if (refined.observed === 0) refined = census;
   }
   // The note's share is the SURFACE-wide census: it is a statement about the whole surface, and
   // quoting the refined pass's share (measured inside coverage, so near 100 %) would invert it.
-  const opening = openingWindow(origin.bounds, refined.box);
+  const opening = openingWindow(origin.bounds, freqBox && census.box
+    ? { f0Hz: freqBox.f0Hz, f1Hz: freqBox.f1Hz, t0Ns: census.box.t0Ns, t1Ns: census.box.t1Ns }
+    : null);
   // **The colour scale, decided here and only here** (T-470). Preferred from the refinement pass,
   // because that answer was measured over the observed region rather than over 6.5 GHz of mostly
   // grey; the coarse pass stands in when there was no refinement to make. Both are already in hand,
@@ -565,6 +580,13 @@ export interface PreviewOptions {
    * `chromeAction` is — see that field's note; the same import-graph rule applies. */
   widthActions?: WidthActionsFor | null;
   onWidthAction?: ((paneId: string, key: string) => void) | null;
+  /** A per-viewport status line (T-1028), forwarded the same way and for the same reason: a string
+   * the host produced, so no host of this surface gains a way to reach a device by supplying one. */
+  chromeStatus?: StatusFor | null;
+  /** The device pill on each pane's row (T-1006) — whose coverage decides that pane's grey.
+   * Forwarded, never produced here, for the same import-graph reason `chromeAction` is: the host
+   * that knows what a `device_id` is supplies the strings. */
+  rowDevice?: RowDeviceFor | null;
   minimapPx?: number;
   /**
    * **The growing edge, reported in (T-445).** Omit it and the surface is historical: the edge is
@@ -612,6 +634,8 @@ export interface PreviewOptions {
   /** HUD axes (T-805, `./hud.ts`): the label layer, and the chrome's fade asked every frame. */
   hud?: HTMLElement | null;
   hudAlpha?: (() => number) | null;
+  /** T-997: the floating chrome's top-left column; a time label that would print into it is dropped. */
+  hudReserve?: (() => HudReserve | null) | null;
   /** Band-1 DOM marks laid out in the render frame (T-809, `./pins.ts`). See `SurfaceViewOptions.dom`. */
   dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
   /**
@@ -631,6 +655,19 @@ export interface PreviewOptions {
    * lane next comes round. Omitted, the live edge advances by polling alone (T-460), as before.
    */
   rows?: RowOpener | null;
+  /**
+   * **The live ring** (T-1042 / LSR-1, `./livering.ts`): the rows `/ws/spectrum/live` has published,
+   * read once per frame, which every **following** pane paints its live edge from.
+   *
+   * Omitted or `null` — the default, and what an unflagged page passes — the surface is drawn from
+   * tiles exactly as before: nothing is asked of the ring, nothing is excluded from the tile lane,
+   * and no ring texture exists.
+   *
+   * A getter rather than a pushed frame for the reason every overlay here is a callback: the ring is
+   * read in the **render pass**, so what is painted is the rows that had arrived when the frame was
+   * drawn, and never a snapshot taken on a poll and laid out against a scroll (T-388).
+   */
+  liveRing?: (() => RingFrame | null) | null;
 }
 
 /**
@@ -642,8 +679,28 @@ export interface PreviewOptions {
 export class SurfacePreview {
   readonly view: SurfaceView;
   readonly probe: SurfaceProbe;
-  /** The pane gestures apply to: the last one pointed at. */
-  activePane: string;
+  /** The pane the chrome acts on (T-1000): see [[activePane]]. */
+  private active: string;
+  private readonly activeListeners = new Set<(id: string) => void>();
+  /**
+   * **The pane gestures and chrome apply to: the last one pressed, right-clicked, wheeled or chosen
+   * by key.** An accessor rather than a field (T-1000) so that every writer — `input.ts`'s press and
+   * wheel, a split, a close, the app's pane keys — tells [[onActiveChange]]'s listeners in the same
+   * call, and the outline and the chrome that name the pane move in the same frame as the press. An
+   * id that is not a pane is refused: an active pane that does not exist would name nothing.
+   */
+  get activePane(): string { return this.active; }
+  set activePane(id: string) {
+    if (id === this.active || !this.view.panes.has(id)) return;
+    this.active = id;
+    for (const f of this.activeListeners) f(id);
+  }
+  /** Be told when the active pane changes. Returns a disposer. Presentation only: a listener is
+   * handed the new id and nothing else, and the change itself moved no view and reached no route. */
+  onActiveChange(f: (id: string) => void): () => void {
+    this.activeListeners.add(f);
+    return () => { this.activeListeners.delete(f); };
+  }
   lastFrame: SurfaceFrame | null = null;
   private readonly canvas: HTMLCanvasElement;
   private raf = 0;
@@ -695,6 +752,8 @@ export class SurfacePreview {
       onChromeAction: opts.onChromeAction ?? null,
       widthActions: opts.widthActions ?? null,
       onWidthAction: opts.onWidthAction ?? null,
+      chromeStatus: opts.chromeStatus ?? null,
+      rowDevice: opts.rowDevice ?? null,
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
@@ -703,8 +762,22 @@ export class SurfacePreview {
       tracePx: opts.tracePx ?? 0,
       hud: opts.hud ?? null,
       hudAlpha: opts.hudAlpha ?? null,
+      hudReserve: opts.hudReserve ?? null,
       dom: opts.dom ?? null,
     });
+    // **The live rows, per following pane** (T-1042). The follow question is answered here, beside
+    // the row feed's own reading of it (`refreshLiveEdge`), because this object is the one that knows
+    // which viewports follow — a frozen pane is a view over recorded data, which the pyramid answers,
+    // and painting live rows into it would be a live claim about a window that is not live. The
+    // minimap is excluded for the same reason it is excluded from the refresh lane: it is a viewport
+    // over the whole surface, where a 40 ms row is a small fraction of a pixel.
+    if (opts.liveRing) {
+      const ring = opts.liveRing;
+      this.view.surface.setLiveRings({
+        ringFor: (paneId) =>
+          paneId !== this.view.minimap.id && this.view.panes.isFollowing(paneId) ? ring() : null,
+      });
+    }
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
     // probe, never from a viewport. Nothing below this line, and nothing in `frame()`, moves it.
@@ -715,7 +788,7 @@ export class SurfacePreview {
     // historical preview). `pause` is a coordinate change (T-347/T-442), so this costs no frame and
     // no jump. With a live edge the first pane stays following and the map follows too — "live" is
     // then just the finest growing edge of this same surface (docs/16 §8.1), not a second mode.
-    this.activePane = this.view.panes.list()[0].id;
+    this.active = this.view.panes.list()[0].id;
     if (!this.edgeFn) {
       this.view.panes.pause(this.activePane, probe.origin.edgeNs);
       this.view.panes.goTo(this.activePane, probe.opening.centerNs);
@@ -1126,9 +1199,26 @@ export class SurfacePreview {
     if (id) this.activePane = id;
   }
 
-  closeActive(): void {
-    if (!this.view.panes.close(this.activePane)) return;
-    this.activePane = this.view.panes.list()[0].id;
+  /** Close the active pane. See [[closePane]] for which pane is active afterwards. */
+  closeActive(at: GlPoint | null = null): void {
+    this.closePane(this.activePane, at);
+  }
+
+  /**
+   * **Close pane `id` (T-1005), and choose the active pane by a stated rule, not by position** —
+   * [[activeAfterClose]]: the pane under the pointer `at` (GL device px of the canvas, against the
+   * layout AFTER the close), else the live one. The last pane never closes. View only — nothing
+   * here reaches a route.
+   */
+  closePane(id: string, at: GlPoint | null = null): boolean {
+    if (!this.view.panes.close(id)) return false;
+    const next = activeAfterClose(this.view.panes.list(), this.view.paneRects(), at, this.active)
+      ?? this.view.panes.list()[0].id;
+    // The setter refuses a no-op, so the listeners still hear about a close that kept the active
+    // pane: the outline and the chrome's "pane N of M" re-state against the new count.
+    if (next === this.active) for (const f of this.activeListeners) f(next);
+    else this.activePane = next;
+    return true;
   }
 }
 

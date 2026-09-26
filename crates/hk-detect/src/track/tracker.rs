@@ -3,9 +3,10 @@
 use std::ops::Range;
 
 use hk_dsp::SpectrumFrame;
+use hk_model::detection::SpurReason;
 use hk_model::{
-    DetectionId, ProvenanceId, TimeRange, Timestamp, TimingFeatures, Track, TrackId, TrackSegment,
-    TrackState,
+    DetectionFlags, DetectionId, ProvenanceId, TimeRange, Timestamp, TimingFeatures, Track,
+    TrackId, TrackSegment, TrackState,
 };
 
 use crate::detector::Detector;
@@ -26,6 +27,10 @@ const SHAPE_RING: usize = 16;
 
 const PENDING_CAPACITY: usize = 256;
 const MEMBER_RING: usize = 1024;
+/// T-948: DC flags refuted (T-174) before their detection was linked to a track. Held so the
+/// refutation is not lost to the order the two arrive in: a detection is held in `pending` until
+/// its group flushes, so a twin already in the index refutes it *before* it is a member.
+const REFUTED_RING: usize = 256;
 const SPLIT_RING: usize = 256;
 const RECENT_BURSTS: usize = 128;
 const SEGMENT_STARTS: usize = 16;
@@ -108,6 +113,9 @@ struct Part {
     at_segment_start: Option<bool>,
     preds: [Option<DetectionId>; 2],
     suspect: bool,
+    /// T-948: the in-capture rules' receiver-artifact verdict on this member, if any
+    /// ([`receiver_artifact_reason`]).
+    artifact: Option<SpurReason>,
     marginal: bool,
     confirmed: bool,
     snr_db: f64,
@@ -115,6 +123,17 @@ struct Part {
     /// the whole occupied band, so it falls as an emission widens (T-280); only the peak compares
     /// like with like across widths.
     snr_peak_db: f64,
+}
+
+/// T-948: the receiver-artifact verdict the in-capture rules reached about one detection, if any
+/// — a [`SpurReason`] is a statement about this receiver's own mixer, clock, supply or spur map,
+/// i.e. *the receiver made it*, not *the air carried it*.
+///
+/// An **image** is deliberately not one of these, confirmed or not. It is a claim about *another*
+/// emission, whose right expression is the artifact-of relation to that source (T-219/`relate`),
+/// not a line of the receiver's own with nothing behind it.
+fn receiver_artifact_reason(f: &DetectionFlags) -> Option<SpurReason> {
+    f.spur_reason.filter(|_| f.spur_candidate)
 }
 
 impl Part {
@@ -241,6 +260,10 @@ struct Slot {
     tune: TuneKey,
     segment: u64,
     suspect: u64,
+    /// T-948: members with a receiver-artifact reason, less DC flags a twin refuted.
+    artifact: u64,
+    /// The reason of the first such member.
+    artifact_reason: Option<SpurReason>,
     confirmed: u64,
     hop_links: u32,
     hop_set: Option<usize>,
@@ -294,6 +317,8 @@ impl Slot {
             tune: g.tune,
             segment: g.segment,
             suspect: 0,
+            artifact: 0,
+            artifact_reason: None,
             confirmed: 0,
             hop_links: 0,
             hop_set: None,
@@ -494,6 +519,9 @@ pub struct Tracker {
     split_head: usize,
     members: Vec<Option<MemberEntry>>,
     member_head: usize,
+    /// T-948: see [`REFUTED_RING`].
+    refuted: Vec<Option<DetectionId>>,
+    refuted_head: usize,
     recent: [Option<RecentBurst>; RECENT_BURSTS],
     recent_head: usize,
     closed_hosts: [Option<HostSpan>; CLOSED_HOSTS],
@@ -539,6 +567,8 @@ impl Tracker {
             split_head: 0,
             members: vec![None; MEMBER_RING],
             member_head: 0,
+            refuted: vec![None; REFUTED_RING],
+            refuted_head: 0,
             recent: [None; RECENT_BURSTS],
             recent_head: 0,
             closed_hosts: [None; CLOSED_HOSTS],
@@ -803,6 +833,7 @@ impl Tracker {
                 || f.image_candidate
                 || f.suspect_imd
                 || f.compressed,
+            artifact: receiver_artifact_reason(f),
             marginal: f.marginal,
             confirmed: r.candidate.is_confirmed(),
             snr_db: d.snr_mean_db,
@@ -834,6 +865,38 @@ impl Tracker {
                 s.dirty = true;
             }
         }
+    }
+
+    /// T-174/T-948: a member's DC flag was refuted by a clean twin from another tuning
+    /// ([`crate::TrackEvent`] consumers see this as `MemberRefuted`). The member stops counting
+    /// towards its track's [`TrackSummary::artifact_detections`], so an emission the receiver
+    /// merely happened to be tuned on top of is admitted to the inventory like any other.
+    ///
+    /// Its `suspect` count is deliberately **not** touched: that share feeds the confirmation
+    /// policy's own tolerances, which were measured with the flag left in place.
+    pub fn refute_dc(&mut self, d: DetectionId) {
+        let hit = self
+            .members
+            .iter()
+            .flatten()
+            .find(|m| m.detection == d)
+            .copied();
+        if let Some(m) = hit {
+            let s = &mut self.slots[m.slot];
+            if s.live && s.id == m.track && s.artifact > 0 {
+                s.artifact -= 1;
+                if s.artifact == 0 {
+                    s.artifact_reason = None;
+                }
+                s.dirty = true;
+            }
+            return;
+        }
+        // Not a member yet (still held in `pending`): remember the refutation so the count never
+        // takes it. The ring is bounded; the oldest refutation is forgotten first, and forgetting
+        // one only leaves the flag standing, which is the conservative direction.
+        self.refuted[self.refuted_head] = Some(d);
+        self.refuted_head = (self.refuted_head + 1) % REFUTED_RING;
     }
 
     /// Flushes every held record and closes every track ([`CloseCause::EndOfStream`]).
@@ -1667,6 +1730,9 @@ impl Tracker {
             let tentative = s.tentative;
             for k in 0..self.scratch.len() {
                 let p = self.scratch[k];
+                // T-948: a DC flag already refuted (T-174) before this member was linked.
+                let refuted = p.artifact == Some(SpurReason::Dc)
+                    && self.refuted.iter().flatten().any(|&d| d == p.id);
                 if tentative {
                     self.tentative_links.push((track, p.id));
                 } else {
@@ -1681,6 +1747,10 @@ impl Tracker {
                 let s = &mut self.slots[i];
                 s.detections += 1;
                 s.suspect += u64::from(p.suspect);
+                if let Some(reason) = p.artifact.filter(|_| !refuted) {
+                    s.artifact += 1;
+                    s.artifact_reason.get_or_insert(reason);
+                }
                 s.confirmed += u64::from(p.confirmed);
             }
         }
@@ -2465,6 +2535,10 @@ impl Tracker {
             t.t_last_start = t.t_last_start.max(f.t_last_start);
             t.t_last_end = t.t_last_end.max(f.t_last_end);
             t.suspect += f.suspect;
+            t.artifact += f.artifact;
+            if let Some(reason) = f.artifact_reason {
+                t.artifact_reason.get_or_insert(reason);
+            }
             t.confirmed += f.confirmed;
             t.segments += f.segments;
             t.snr_sum += f.snr_sum;
@@ -2668,6 +2742,8 @@ impl Tracker {
             } else {
                 0.0
             },
+            artifact_detections: s.artifact,
+            artifact_reason: s.artifact_reason,
             confirmed_detections: s.confirmed,
             bin_hz: s.bin_hz,
             next_burst_eta: period

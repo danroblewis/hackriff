@@ -22,6 +22,9 @@ TWO PROPERTIES ARE WORTH MORE THAN THE REST:
     `shell-snapshots/snapshot-zsh`, only when unowned, only above 50 % for ten minutes. Every
     other rule alerts. `test_kill_*` pins each of those four conditions separately, because a
     watchdog that kills on a guess is worse than the contention it watches for.
+    The one other kill, rule (h) (2026-09-25's worktree orphans), is locked the same way: a
+    build/test process, unowned, in a worktree no live claim and no owned process protects, for
+    ten minutes - `test_h_*` pins each protection separately.
 """
 from __future__ import annotations
 
@@ -761,3 +764,251 @@ def test_the_explorer_windows_server_and_agent_are_the_explorers():
     )
     agg, unowned = W.owners(rows, {})
     assert set(agg["explorer"]["pids"]) == {63953, 62901, 62445} and unowned == []
+
+
+# --------------------------------------------------------------------- (h) worktree orphans
+# 2026-09-25: a `zsh -c 'cargo build -p hk-cli --bin hk | grep | head'` in worktrees/t901 ran 15 h with
+# ppid 1 and no claim; the nextest runs of the sessions killed at 09:34 kept going in t926/t940/t950-red/
+# t953. None was over 90 % CPU. lsof (the cwd) and os.kill are faked; ps and the claims file are synthetic.
+WT = f"{W.REPO}/.claude/worktrees/t0-wdtest"   # this repo's worktrees (WT_RE is anchored); never exists
+NEXTEST = "/opt/homebrew/bin/cargo-nextest nextest run -p hk-pipeline -E binary(listen_waits_for_carrier)"
+WRAPPER = "/bin/zsh -c cargo build -p hk-cli --bin hk 2>&1 | grep -E error | head -20"
+ROLE = "claude --model opus --append-system-prompt-file /Users/d/hackriff/.claude/roles/coordinator.md"
+
+
+class FakeLsof:
+    """`cwds` maps pid -> cwd; every argv is recorded, so a test can count the lsof calls."""
+
+    def __init__(self, cwds, fail=False):
+        self.cwds, self.fail, self.calls = dict(cwds), fail, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        if self.fail:
+            raise OSError("lsof: not found")
+        pids = [int(p) for p in argv[argv.index("-p") + 1].split(",")]
+        out = "".join(f"p{p}\nfcwd\nn{self.cwds[p]}\n" for p in pids if p in self.cwds)
+        return W.subprocess.CompletedProcess(argv, 0, out, "")
+
+
+def _orphan_env(monkeypatch, tmp_path, rows, claims=None, cwds=None, fail=False):
+    """Returns (lsof, signals sent). The claims file is what kill_orphans re-reads before a signal."""
+    import json
+    (tmp_path / "work-claims.json").write_text(json.dumps(claims or {}))
+    lsof = FakeLsof(cwds or {}, fail)
+    monkeypatch.setattr(W.subprocess, "run", lsof)
+    monkeypatch.setattr(W, "read_ps", lambda: rows)
+    sent = []
+    monkeypatch.setattr(W.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    return lsof, sent
+
+
+def _ticks(rows, claims, since, times, dry=False):
+    out = None
+    for t in times:
+        out = W.wt_orphans(rows, claims or {}, since, t, dry)
+    return out
+
+
+def test_h_stops_an_orphan_nextest_after_ten_minutes_not_before(monkeypatch, tmp_path):
+    rows = table(row(35689, 1, NEXTEST, cpu=0.8))
+    lsof, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT + "/crates"})
+    since: dict = {}
+    assert _ticks(rows, {}, since, [0.0, W.ORPHAN_FOR - 1]) == ([], []) and sent == []
+    alarms, pids = W.wt_orphans(rows, {}, since, W.ORPHAN_FOR)
+    assert sent == [(35689, W.signal.SIGTERM)] and pids == [35689]
+    (a,) = alarms
+    assert a["level"] == "red" and a["key"] == "watchdog:wt-orphan" and "t0-wdtest" in a["title"]
+    assert "pid 35689" in a["body"] and WT in a["body"] and "no running/fix-held/limited claim on any host" in a["body"].lower()
+    # ONE lsof per tick, over the candidate only; cwd found the worktree though the command names none
+    assert len(lsof.calls) == 3 and all(c[-1] == "35689" for c in lsof.calls)
+    log = (tmp_path / "watchdog.log").read_text()
+    assert "KILL-ORPHAN SIGTERM pid=35689" in log and NEXTEST in log
+
+
+@pytest.mark.parametrize("state", ["running", "fix-held", "limited"])
+@pytest.mark.parametrize("host", [None, "node2"])
+def test_h_never_with_a_live_claim_on_that_worktree_on_any_host(monkeypatch, tmp_path, state, host):
+    claims = {"T-926": {"state": state, "ticket": "T-926", "wt": WT, "pid": 4242, "host": host}}
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, claims, cwds={35689: WT})
+    assert _ticks(rows, claims, {}, [0.0, W.ORPHAN_FOR, 2 * W.ORPHAN_FOR]) == ([], []) and sent == []
+
+
+def test_h_a_queued_claim_does_not_protect(monkeypatch, tmp_path):
+    """A queued claim is a handed-back branch: nothing of its agent should still be running."""
+    claims = {"T-926": {"state": "queued", "ticket": "T-926", "wt": WT}}
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, claims, cwds={35689: WT})
+    _ticks(rows, claims, {}, [0.0, W.ORPHAN_FOR])
+    assert sent == [(35689, W.signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("how", ["command line", "cwd"])
+def test_h_never_while_an_owned_process_runs_in_that_worktree(monkeypatch, tmp_path, how):
+    """A role session's subagent working there: its shell is owned by ancestry."""
+    shell = "/bin/zsh -c source /Users/d/.claude/shell-snapshots/snapshot-zsh-1.sh && eval " + (
+        f"'cd {WT} && git status'" if how == "command line" else "'git status'")
+    rows = table(row(500, 1, ROLE), row(510, 500, shell), row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT, 510: WT, 500: "/Users/d/hackriff"})
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR, 2 * W.ORPHAN_FOR]) == ([], []) and sent == []
+
+
+def test_h_never_a_rustc_under_sccache_but_a_bare_rustc_is_a_candidate(monkeypatch, tmp_path):
+    rustc = f"/opt/homebrew/bin/rustc --crate-name hk_cli --out-dir {WT}/target/debug/deps"
+    rows = table(row(93140, 1, "/opt/homebrew/bin/sccache"), row(62637, 93140, rustc, cpu=429.0))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows)
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR, 2 * W.ORPHAN_FOR]) == ([], []) and sent == []
+    bare = table(row(62637, 1, rustc, cpu=100.0))
+    _, sent = _orphan_env(monkeypatch, tmp_path, bare)
+    _ticks(bare, {}, {}, [0.0, W.ORPHAN_FOR])
+    assert sent == [(62637, W.signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("cwd,fail", [("/Users/d/hackriff", False), ("/Users/d/hackriff/target", False),
+                                      (None, True)])
+def test_h_never_outside_claude_worktrees_or_without_a_cwd(monkeypatch, tmp_path, cwd, fail):
+    """The main checkout and the gate's target are not worktrees; a failed lsof is no cwd, not a guess."""
+    rows = table(row(35689, 1, NEXTEST), row(35700, 1, "/Users/d/hackriff/target/debug/hk serve --bind 127.0.0.1:9"))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: cwd, 35700: cwd} if cwd else {}, fail=fail)
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR, 2 * W.ORPHAN_FOR]) == ([], []) and sent == []
+
+
+def test_h_a_shell_wrapper_that_survives_sigterm_gets_sigkill_next_tick(monkeypatch, tmp_path):
+    """The t901 wrapper ignored SIGTERM."""
+    rows = table(row(7001, 1, WRAPPER), row(7002, 7001, "/opt/homebrew/bin/cargo build -p hk-cli --bin hk"),
+                 row(7003, 7001, "grep -E error"))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={7001: WT, 7002: WT, 7003: WT})
+    since: dict = {}
+    _ticks(rows, {}, since, [0.0, W.ORPHAN_FOR])
+    assert sorted(sent) == [(7001, W.signal.SIGTERM), (7002, W.signal.SIGTERM)]    # grep is not a build
+    sent.clear()
+    W.wt_orphans(rows, {}, since, W.ORPHAN_FOR + 20)
+    assert sorted(sent) == [(7001, W.signal.SIGKILL), (7002, W.signal.SIGKILL)]
+    assert "KILL-ORPHAN SIGKILL pid=7001" in (tmp_path / "watchdog.log").read_text()
+    W.wt_orphans(table(row(1, 0, "/sbin/launchd")), {}, since, W.ORPHAN_FOR + 40)   # gone: clocks forgotten
+    assert not any(k.startswith("orphan") for k in since)
+
+
+def test_h_dry_run_kills_nothing(monkeypatch, tmp_path):
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT})
+    since: dict = {}
+    _ticks(rows, {}, since, [0.0], dry=True)
+    alarms, pids = W.wt_orphans(rows, {}, since, W.ORPHAN_FOR, dry=True)
+    assert sent == [] and pids == [] and "would stop 1" in alarms[0]["title"]
+    W.wt_orphans(rows, {}, since, W.ORPHAN_FOR + 20, dry=True)
+    assert sent == []
+
+
+def test_h_rechecks_the_claims_file_before_each_signal(monkeypatch, tmp_path):
+    """Belt and braces: a claim that appeared since this tick's read wins."""
+    rows = table(row(35689, 1, NEXTEST))
+    live = {"T-926": {"state": "running", "ticket": "T-926", "wt": WT}}
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, claims=live, cwds={35689: WT})
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR]) == ([], []) and sent == []   # stale {} in, fresh claim on disk
+    assert "KILL-ORPHAN-REFUSED pid=35689" in (tmp_path / "watchdog.log").read_text()
+
+
+def test_h_a_quiet_box_runs_no_lsof(monkeypatch, tmp_path):
+    rows = table(row(500, 1, ROLE), row(510, 500, "/opt/homebrew/bin/cargo build"))
+    lsof, _ = _orphan_env(monkeypatch, tmp_path, rows)
+    W.wt_orphans(rows, {}, {}, 0.0)
+    assert lsof.calls == []
+
+
+def _admin(tmp_path, monkeypatch, mtime=None, which="index", gitfile=True):
+    """A worktree under a tmp repo whose `.git` file points at an admin dir with a DIFFERENT name,
+    so the test proves the gitdir: line is read rather than the name assumed."""
+    import os
+    repo = tmp_path / "repo"
+    wt = repo / ".claude" / "worktrees" / "t9"
+    admin = repo / ".git" / "worktrees" / "t9-renamed"
+    (admin / "logs").mkdir(parents=True)
+    wt.mkdir(parents=True)
+    if gitfile:
+        (wt / ".git").write_text(f"gitdir: {admin}\n")
+    for f in ("index", "HEAD", "logs/HEAD"):
+        (admin / f).write_text("x")
+        os.utime(admin / f, (1.0, 1.0))
+    if mtime is not None:
+        os.utime(admin / which, (mtime, mtime))
+    monkeypatch.setattr(W, "WT_RE", W._wt_re(str(repo)))
+    return str(wt)
+
+
+NOW = 1_000_000.0
+
+
+@pytest.mark.parametrize("dry", [False, True])       # dry: the tick's own check, with no kill-time re-check behind it
+@pytest.mark.parametrize("which", ["index", "HEAD", "logs/HEAD"])
+def test_h_git_activity_in_the_worktree_protects_it(monkeypatch, tmp_path, which, dry):
+    """A live claim-less agent's detached `cmd &` looks like t901 from ps; its git status/diff does not."""
+    wt = _admin(tmp_path, monkeypatch, mtime=NOW + W.ORPHAN_FOR - 60, which=which)
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: wt})
+    assert _ticks(rows, {}, {}, [NOW, NOW + W.ORPHAN_FOR], dry=dry) == ([], []) and sent == []
+
+
+@pytest.mark.parametrize("mtime,gitfile", [(NOW - W.ORPHAN_FOR - 1, True), (None, True), (NOW + 10, False)])
+def test_h_stale_missing_or_unreadable_git_activity_is_no_evidence(monkeypatch, tmp_path, mtime, gitfile):
+    wt = _admin(tmp_path, monkeypatch, mtime=mtime, gitfile=gitfile)
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: wt})
+    _ticks(rows, {}, {}, [NOW, NOW + W.ORPHAN_FOR])
+    assert sent == [(35689, W.signal.SIGTERM)]
+
+
+def test_h_another_repos_worktrees_are_never_candidates(monkeypatch, tmp_path):
+    other = "/Users/daniellewis/other/.claude/worktrees/t1"
+    nested = f"{W.REPO}/hackriff-2/.claude/worktrees/t1"
+    assert W.worktrees_in(f"cd {other} && cd {nested}") == []
+    assert W.worktrees_in(f"cd {WT}/crates && x") == [WT]
+    rows = table(row(35689, 1, NEXTEST), row(35690, 1, f"{nested}/target/debug/hk serve --bind 127.0.0.1:9"),
+                 row(35691, 1, f"/bin/zsh -c cd {other} && cargo test"))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: other, 35690: nested, 35691: other})
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR, 2 * W.ORPHAN_FOR]) == ([], []) and sent == []
+
+
+@pytest.mark.parametrize("cmd_names_the_claimed_one", [True, False])
+def test_h_protected_if_either_the_command_lines_or_the_cwds_worktree_is(monkeypatch, tmp_path,
+                                                                          cmd_names_the_claimed_one):
+    other = f"{W.REPO}/.claude/worktrees/t0-other"
+    claimed, free = (WT, other) if cmd_names_the_claimed_one else (other, WT)
+    claims = {"T-1": {"state": "running", "ticket": "T-1", "wt": claimed}}
+    rows = table(row(35689, 1, f"/bin/zsh -c cd {free if not cmd_names_the_claimed_one else claimed} && cargo test"))
+    cwd = free if cmd_names_the_claimed_one else claimed
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, claims, cwds={35689: cwd})
+    assert _ticks(rows, claims, {}, [0.0, W.ORPHAN_FOR]) == ([], []) and sent == []
+
+
+def test_h_recheck_refuses_a_reused_pid(monkeypatch, tmp_path):
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT})
+    monkeypatch.setattr(W, "read_ps", lambda: table(row(35689, 1, "/opt/homebrew/bin/cargo build -p other")))
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR]) == ([], []) and sent == []
+    assert "KILL-ORPHAN-REFUSED pid=35689" in (tmp_path / "watchdog.log").read_text()
+
+
+def test_h_recheck_refuses_a_row_that_is_now_owned(monkeypatch, tmp_path):
+    rows = table(row(35689, 1, NEXTEST))
+    _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT})
+    monkeypatch.setattr(W, "read_ps", lambda: table(row(500, 1, ROLE), row(35689, 500, NEXTEST)))
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR]) == ([], []) and sent == []
+
+
+@pytest.mark.parametrize("cmd", ["/bin/zsh -c sleep 1000", f"/bin/zsh -c cd {WT} && sleep 1000"])
+def test_h_a_shell_that_wraps_no_build_is_not_a_candidate(monkeypatch, tmp_path, cmd):
+    rows = table(row(35689, 1, cmd))
+    lsof, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT})
+    assert _ticks(rows, {}, {}, [0.0, W.ORPHAN_FOR, 2 * W.ORPHAN_FOR]) == ([], []) and sent == []
+    assert lsof.calls == []
+
+
+def test_h_nothing_due_runs_no_second_ps(monkeypatch, tmp_path):
+    rows = table(row(35689, 1, NEXTEST))
+    _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: WT})
+    reads = []
+    monkeypatch.setattr(W, "read_ps", lambda: reads.append(1) or rows)
+    W.wt_orphans(rows, {}, {}, 0.0)
+    assert reads == []

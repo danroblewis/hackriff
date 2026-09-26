@@ -286,15 +286,19 @@ export const keyOf = (a: TileAddr): string =>
   `${a.device}|${a.scheme}|${a.levelF}|${a.levelT}|${a.fIndex}|${a.tIndex}|${a.cells}`;
 
 /**
- * The plane encoding this client asks for, on every tile request (T-533).
+ * The plane encoding this client asks for, on every tile request (T-533, widened by T-1019).
  *
  * `max_db` is 64 % of a live tile's body as JSON decimal text, and its destination is an R16F
- * texture — seventeen digits sent for eleven bits kept. `f16` is the same values as base64
- * binary16, which is what [[decodeTile]] knows how to read; asking for a spelling this client
- * cannot decode would be worse than not asking at all, so **the name here and the decoder are one
- * change**. A server that answers in another spelling is refused rather than mis-read.
+ * texture — seventeen digits sent for eleven bits kept. `f16` spelled that one plane as base64
+ * binary16; `compact` spells **every** per-cell plane typed and drops `grid.coverage`, which
+ * `coverage.planes[].runs` in the same answer already carries — the three JSON arrays f16 left
+ * behind were most of an 850 kB body and most of the ~12 ms a hot-cache hit spent producing it.
+ *
+ * Asking for a spelling this client cannot decode would be worse than not asking at all, so **the
+ * name here and the decoder are one change**. A server that answers in another spelling is refused
+ * rather than mis-read.
  */
-export const TILE_PLANES = "f16";
+export const TILE_PLANES = "compact";
 
 /**
  * The most addresses this client puts in one batch request (T-573).

@@ -56,7 +56,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::chains::spec::ChainSpec;
-use crate::class::{class_name, source_class, window_class};
+use crate::class::{SubBandClass, class_name, source_class, window_class, window_class_map};
 use crate::config::{DisplayPatch, DisplaySettings, PipelineConfig, detection_resolution};
 use crate::control::{SchedState, SwitchableControl};
 use crate::events::{Candidate, ControlEvent};
@@ -314,7 +314,7 @@ pub struct CommandedWindow {
 }
 
 impl CommandedWindow {
-    fn new(window: (f64, f64)) -> Self {
+    pub(crate) fn new(window: (f64, f64)) -> Self {
         Self {
             center_bits: AtomicU64::new(window.0.to_bits()),
             rate_bits: AtomicU64::new(window.1.to_bits()),
@@ -333,7 +333,7 @@ impl CommandedWindow {
     /// sides of the two loads, so the pair returned is never half of one command and half of
     /// another — a torn pair would make the guard wait for a window that was never commanded at
     /// all, which is the very fault this type exists to remove.
-    fn get(&self) -> ((f64, f64), u64) {
+    pub(crate) fn get(&self) -> ((f64, f64), u64) {
         loop {
             let before = self.generation.load(Ordering::SeqCst);
             let center = f64::from_bits(self.center_bits.load(Ordering::SeqCst));
@@ -644,10 +644,17 @@ pub(crate) struct Shared {
     pub fs: f64,
     pub fft_len: usize,
     pub averages: usize,
-    pub inventory: Mutex<Box<dyn Inventory>>,
+    /// **The run's inventory, not the segment's** (T-941): every segment holds a clone of the one
+    /// `Arc` [`Common::inventory`] owns. See there for why it is the run's.
+    pub inventory: Arc<Mutex<Box<dyn Inventory>>>,
     pub specs: Vec<ChainSpec>,
     /// Display settings (shared by every segment of the run).
     pub display: Arc<DisplayControl>,
+    /// T-974: the window the run last commanded the front end to (the run's own, shared by every
+    /// segment; a further front end with no control plane holds its fixed window). What a channel
+    /// is planned against before the capture thread has published a block's tune
+    /// ([`crate::recipes::runtime::planning_tune`]).
+    pub commanded: Arc<CommandedWindow>,
     /// The run continues in a new segment after this one: history is not sealed at its end.
     pub continues: AtomicBool,
     /// T-510: this segment's history reader takes the end-of-run seal itself. True for a
@@ -680,11 +687,22 @@ pub(crate) struct Shared {
     /// by the `hk-survey` reader and applied to every classification of a window captured under
     /// that state.
     pub receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-978: the one-shot spectrum hand-off behind the overlap re-analysis
+    /// ([`crate::overlap`]). The **detect reader** publishes a snapshot when the inventory has
+    /// asked for one; the **detect writer** takes it, measures every region stage 4 could not
+    /// resolve and applies the verdict. Nothing is copied while no overlap is unresolved.
+    pub region_spectrum: Arc<crate::overlap::RegionSpectrum>,
     /// T-484: the hand-off to the view lattice's writer thread. The **spectrum** reader fills it
     /// (the finest node is that reader's own rows); the **history** reader owns the writer thread
     /// that drains it and the T-446 decision about sealing. `None` when the view lattice is off or
     /// could not open.
     pub view_queue: Option<Arc<crate::history::ViewQueue>>,
+    /// T-844: the run's C38 shadow stage, observed at the classifier's call site.
+    pub ml: Option<Arc<crate::ml::MlStage>>,
+    /// T-977: the last completed control-channel hunt pass, with the verdict on every channel it
+    /// looked at. One `Option`, replaced per pass — the durable half of a verdict is the
+    /// `emitter_synthesis` row the same pass writes.
+    pub cc_verdicts: Arc<crate::ccverdict::CcVerdictLog>,
 }
 
 impl Shared {
@@ -726,6 +744,15 @@ pub struct ControlStats {
     pub replumb_failures: AtomicU64,
     /// Segments restarted after a capture or re-plumb failure (T-508).
     pub capture_recoveries: AtomicU64,
+    /// T-941: threads of an earlier segment **left behind** because they had not stopped within
+    /// [`REPLUMB_JOIN_BOUND`] of their segment ending (`join_workers`).
+    ///
+    /// Served rather than kept internal, for the reason `window_settle_timeouts` is: a thread that
+    /// does not observe its segment's stop is a defect, and it is one the user could otherwise
+    /// only learn about from a line on stderr. Non-zero means the re-plumb went on without one —
+    /// **not** that anything was detached: since T-941 the run's inventory is the run's, so an
+    /// abandoned straggler can delay the next segment's inventory writes and never silence them.
+    pub workers_abandoned: AtomicU64,
     /// Segments whose state was **salvaged** because a thread of the old segment still held it
     /// past [`unwrap_shared`]'s bound (T-508): a fresh database connection, and the inventory taken
     /// from under the straggler. It used to end the run.
@@ -795,8 +822,13 @@ pub struct RetuneOutcome {
 pub struct ControlStatus {
     /// Device settings can be changed (a live, window-classed source).
     pub live: bool,
-    /// Content class of the running segment.
+    /// Content class of the running segment: the summary of [`Self::content_classes`] for what
+    /// covers the whole window (its IQ, spectrum stream, recordings).
     pub content_class: ContentClass,
+    /// The window's content classes per sub-band, at the resolution of its allocations (T-991,
+    /// [`crate::class::window_class_map`]); a single entry for a source whose class is not the
+    /// window's derived one (a recording's own `hackriff:content_class`).
+    pub content_classes: Vec<SubBandClass>,
     /// Requested centre, Hz.
     pub center_hz: f64,
     /// Requested sample rate, Hz.
@@ -818,6 +850,21 @@ pub struct ControlStatus {
     pub recording: RecordingStatus,
     /// Control counters.
     pub stats: Value,
+}
+
+/// The per-sub-band class map `/api/status` reports (T-991): the window's derived map when the
+/// run's class is the one derived from its window, else the run's own class over the whole
+/// window (a recording tagged with `hackriff:content_class` is not re-derived per sub-band).
+fn status_class_map(class: ContentClass, center_hz: f64, rate_hz: f64) -> Vec<SubBandClass> {
+    if window_class(center_hz, rate_hz) == class {
+        return window_class_map(center_hz, rate_hz);
+    }
+    vec![SubBandClass {
+        lo_hz: center_hz - rate_hz / 2.0,
+        hi_hz: center_hz + rate_hz / 2.0,
+        content_class: class,
+        source: "source class".to_owned(),
+    }]
 }
 
 /// Whether a run's front end is delivering samples (T-508).
@@ -879,10 +926,33 @@ struct Common {
     /// rather than through `Shared.inventory` keeps an API read off a mutex a capture worker may
     /// hold. A re-plumb carries the inventory across unchanged, so the value stays true.
     synthesized_confirm: crate::inventory::SynthesizedConfirm,
+    /// **The run's inventory** (T-941). One inventory for the whole run: every segment's
+    /// [`Shared`] holds a clone of this `Arc`, so a re-plumb hands it to the next segment *by
+    /// construction* — there is nothing to move, and so nothing that can fail to be moved.
+    ///
+    /// It used to be a segment's own ([`Parts`]), moved out of the old [`Shared`] at every
+    /// re-plumb. That move needed the old state to be unwrappable and the inventory mutex to be
+    /// free, and when a straggler held either, [`take_parts`] **took the inventory from under it
+    /// and left the run a [`crate::inventory::NullInventory`]** — permanently. T-941's live
+    /// report is what that costs: after one class-boundary retune whose `hk-detect` and
+    /// `hk-control` had not stopped within [`REPLUMB_JOIN_BOUND`], detection went on writing rows
+    /// (`detections_written` 12 487 → 15 619 in 20 s) while `tracks_opened` never moved again and
+    /// `/api/inventory` answered `total 0` — "Nothing on the air" everywhere, until a restart.
+    ///
+    /// A straggler still inside an `Inventory` call can now only **delay** the next segment's
+    /// first inventory write, by the length of that one call, and the run recovers by itself when
+    /// it returns. The inventory is also where it belongs: its track→emitter bindings and
+    /// re-measurement keys are memory of the *run*, which is why they were carried across a
+    /// re-plumb in the first place.
+    inventory: Arc<Mutex<Box<dyn Inventory>>>,
     data_dir: PathBuf,
     db_path: PathBuf,
     survey_id: SurveyId,
     counters: Arc<Counters>,
+    /// T-978: one spectrum hand-off for the whole run ([`crate::overlap`]), so what the overlap
+    /// re-analysis cost the reader and the writer is one measured number per run and not one per
+    /// segment.
+    region_spectrum: Arc<crate::overlap::RegionSpectrum>,
     product: Arc<Mutex<FloorProduct>>,
     display: Arc<DisplayControl>,
     switch: Arc<SwitchableControl>,
@@ -901,6 +971,10 @@ struct Common {
     listen: Arc<Mutex<crate::config::ListenSettings>>,
     /// Burst taps (T-060), closed when the run ends.
     bursts: Arc<crate::chains::taps::BurstHub>,
+    /// T-977: the last control-channel hunt pass, with its per-channel verdicts. Run-wide rather
+    /// than per segment: a re-plumb starts a new segment and the answer to "what did the hunt last
+    /// decide" does not become unknown because the front end was re-tuned.
+    cc_verdicts: Arc<crate::ccverdict::CcVerdictLog>,
     /// Compute providers (T-056): built once per run, so no segment changes provider.
     compute: hk_dsp::compute::Compute,
     /// Occupancy engine and series (T-118), closed when the run ends.
@@ -915,6 +989,10 @@ struct Common {
     alarms: Option<Arc<crate::alarms::AlarmService>>,
     /// T-115: the observation log (`None` when it could not be opened).
     observations: Option<crate::observe::ObservationLog>,
+    /// T-844: the C38 shadow stage (`crate::ml`) — the model registry under the data directory,
+    /// the modes an operator set, and the durable shadow log. `None` only when its store could not
+    /// open, which is reported and never fails the run.
+    ml: Option<Arc<crate::ml::MlStage>>,
     /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
     scheduler: Arc<crate::control::SchedulerHub>,
     /// T-157: the rolling IQ capture buffer, fed by every segment's `hk-iqbuffer` reader.
@@ -924,6 +1002,9 @@ struct Common {
     /// the run, not the segment: a re-plumb landing back on the same device, tune and gain is the
     /// same receiver, and re-measuring it would pay twice for an unchanged answer.
     receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-979: the run's 8VSB television survey, measured once per capture state by every segment's
+    /// `hk-atsc` reader. A window narrower than one 6 MHz channel never reaches it.
+    atsc: Arc<crate::atsc::AtscSurvey>,
     /// T-439: the **view-scheme** pyramid (`docs/16` §6.2/§8.2), opened beside the floor product's
     /// scheme-1 pair and written by every segment's history reader. It is the surface the unified
     /// canvas addresses with independent `(level_f, level_t)`, and its finest node is the *live
@@ -1340,14 +1421,17 @@ impl Pipeline {
         });
         let common = Common {
             synthesized_confirm: inventory.synthesized_confirm(),
+            inventory: Arc::new(Mutex::new(inventory)),
             view,
             iq_buffer,
             receiver: Arc::default(),
+            atsc: Arc::default(),
             gnss,
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
             counters,
+            region_spectrum: Arc::default(),
             compute,
             occupancy,
             retention,
@@ -1370,6 +1454,7 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             detection_fft_len: cfg.settings.fft_len,
             bursts: Arc::default(),
+            cc_verdicts: Arc::default(),
             // T-115: never fails the run; a log that cannot open is reported and skipped.
             scheduler: Arc::new(crate::control::SchedulerHub::default()),
             observations: crate::observe::ObservationLog::open(
@@ -1383,6 +1468,10 @@ impl Pipeline {
             )
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),
+            ml: crate::ml::MlStage::open(&cfg.data_dir)
+                .map(Arc::new)
+                .map_err(|e| eprintln!("ML shadow stage disabled: {e:#}"))
+                .ok(),
             fail_segment_starts: std::sync::atomic::AtomicU32::new(0),
             reopen: reopen.map(|f| Arc::new(Mutex::new(f))),
             worker_panic: Arc::default(),
@@ -1405,11 +1494,7 @@ impl Pipeline {
         let window = (info.center_hz, info.sample_rate_hz);
         // T-510: every further front end is built from the run's configuration as it stands here.
         let template = (!extra.is_empty()).then(|| cfg.clone());
-        let parts = Parts {
-            cfg,
-            repo,
-            inventory,
-        };
+        let parts = Parts { cfg, repo };
         let Started {
             shared,
             tx,
@@ -1516,7 +1601,7 @@ impl Pipeline {
             sup,
             thread: Some(thread),
             started: Instant::now(),
-            recipes: std::sync::OnceLock::new(),
+            recipes: Arc::new(std::sync::OnceLock::new()),
             vlf: Arc::default(),
         })
     }
@@ -1525,10 +1610,15 @@ impl Pipeline {
 /// The parts of a segment that outlive it: handed from each segment to the next at a re-plumb,
 /// and — since T-508 — **never lost on a failure**, so a failed re-plumb can start another
 /// segment instead of ending the run.
+///
+/// T-941: the **inventory is not here any more**. It is the run's ([`Common::inventory`]), so
+/// there is nothing for a re-plumb to hand over and nothing a straggler can hold it away from.
+/// What is left is the configuration and the segment's repository *connection* — a connection is
+/// the one thing that is genuinely better per segment: a straggler that never lets go of one
+/// blocks only its own segment, and [`take_parts`] opens a fresh one for the next.
 struct Parts {
     cfg: PipelineConfig,
     repo: Repository,
-    inventory: Box<dyn Inventory>,
 }
 
 /// A segment that did not start, with its parts when they could be kept (T-508).
@@ -1547,11 +1637,7 @@ fn start_segment(
     source: Box<dyn Source>,
     expect: Option<(f64, f64)>,
 ) -> Result<Started, SegmentFailure> {
-    let Parts {
-        cfg,
-        repo,
-        inventory,
-    } = parts;
+    let Parts { cfg, repo } = parts;
     let mut source = Lent::wrap(source, &common.slot);
     if cfg.live_window_class {
         source = WindowGuard::wrap(
@@ -1619,11 +1705,7 @@ fn start_segment(
             Err(error) => {
                 return Err(SegmentFailure {
                     error,
-                    parts: Some(Box::new(Parts {
-                        cfg,
-                        repo,
-                        inventory,
-                    })),
+                    parts: Some(Box::new(Parts { cfg, repo })),
                 });
             }
         }
@@ -1664,6 +1746,7 @@ fn start_segment(
     let shared = Arc::new(Shared {
         dc_twin: dc_twin_rule(common),
         receiver: Arc::clone(&common.receiver),
+        ml: common.ml.clone(),
         counters: Arc::clone(&common.counters),
         ring,
         gate,
@@ -1674,16 +1757,19 @@ fn start_segment(
         fs,
         fft_len,
         averages,
-        inventory: Mutex::new(inventory),
+        inventory: Arc::clone(&common.inventory),
         specs,
         display: Arc::clone(&common.display),
+        commanded: Arc::clone(&common.commanded),
         continues: AtomicBool::new(false),
         successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
         seal_at_end: !common.defer_seal,
         bursts: Arc::clone(&common.bursts),
+        cc_verdicts: Arc::clone(&common.cc_verdicts),
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
         compute: common.compute.clone(),
+        region_spectrum: Arc::clone(&common.region_spectrum),
         view_queue: common.view.is_some().then(|| {
             Arc::new(crate::history::ViewQueue::new(
                 crate::history::VIEW_QUEUE_FRAMES,
@@ -1769,6 +1855,13 @@ fn start_segment(
                 "hk-survey",
                 Box::new(move || crate::survey::run(s, r)),
             )?);
+        }
+        {
+            // T-979: the 8VSB television survey. One window per capture state, on its own thread.
+            // A tuned span narrower than one 6 MHz channel short-circuits in the reader, so a
+            // capture that cannot hold an ATSC emission pays one comparison per block.
+            let (s, a) = (Arc::clone(&shared), Arc::clone(&common.atsc));
+            workers.push(spawn("hk-atsc", Box::new(move || crate::atsc::run(s, a)))?);
         }
         {
             // T-322: the C36 L1 dwell reader. It holds nothing until C04 grants a scheduled L1 step,
@@ -1935,6 +2028,9 @@ fn join_workers(
             errors.push(format!(
                 "{name}: still running {REPLUMB_JOIN_BOUND:?} after its segment ended; left behind"
             ));
+            // T-941: counted, not only printed and pushed into `errors` — `errors` reaches the
+            // user when the run *ends*, and this is a fact about a run that is still going.
+            inc(&sup.common.stats.workers_abandoned);
             continue;
         }
         let failed = match join.join() {
@@ -2364,59 +2460,46 @@ fn unwrap_shared(mut arc: Arc<Shared>) -> Result<Shared, Arc<Shared>> {
 /// The [`Parts`] of a segment that has ended: unwrapped when nothing else holds its state, else
 /// **salvaged** (T-508). A straggler still holding the old `Shared` — a chain or tap thread that
 /// did not end with its segment — used to end the run ("a thread of the previous segment still
-/// holds its state"). Now the next segment gets its own database connection and the inventory is
-/// taken from under the straggler (which is left a [`crate::inventory::NullInventory`]), counted
-/// as `segments_salvaged`. `Err` only when the database cannot be opened again.
+/// holds its state"). Now the next segment gets its own database connection, counted as
+/// `segments_salvaged`. `Err` only when the database cannot be opened again.
+///
+/// # T-941: what a straggler can no longer take with it
+///
+/// This used to salvage the **inventory** too, by taking it out from under the straggler with a
+/// one-second `try_lock` and leaving a [`crate::inventory::NullInventory`] behind. When that lock
+/// was busy — which is exactly what a straggler *inside* an inventory call is — it printed "the
+/// old segment's inventory is locked by its straggler; continuing without inventory" and the run
+/// went on with a null inventory **for the rest of its life**: rows kept being written and no
+/// track, candidate or emitter ever reached the user again (the report at
+/// [`Common::inventory`]).
+///
+/// The inventory is the run's now, so this function never touches it: the next segment already
+/// has it. A straggler holding the inventory lock delays that segment's first inventory write by
+/// the length of its own call and nothing else — and the whole "continue without X" shape is
+/// gone, because there is no X to continue without.
 fn take_parts(c: &Common, old: Arc<Shared>) -> Result<Parts, String> {
     let arc = match unwrap_shared(old) {
         Ok(s) => {
             return Ok(Parts {
                 cfg: s.cfg,
                 repo: s.repo.into_inner().unwrap_or_else(PoisonError::into_inner),
-                inventory: s
-                    .inventory
-                    .into_inner()
-                    .unwrap_or_else(PoisonError::into_inner),
             });
         }
         Err(arc) => arc,
     };
     inc(&c.stats.segments_salvaged);
     eprintln!(
-        "segment state still held {} s after its threads ended ({} holders); salvaging it",
+        "segment state still held {} s after its threads ended ({} holders); salvaging it (the \
+         run's inventory is not the segment's and is unaffected)",
         UNWRAP_BOUND.as_secs(),
         Arc::strong_count(&arc) - 1
     );
     let repo = Repository::open(&c.db_path).map_err(|e| {
         format!("a thread of the previous segment still holds its state, and reopening the database failed: {e}")
     })?;
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let inventory: Box<dyn Inventory> = loop {
-        match arc.inventory.try_lock() {
-            Ok(mut g) => {
-                break std::mem::replace(&mut *g, Box::new(crate::inventory::NullInventory));
-            }
-            Err(std::sync::TryLockError::Poisoned(p)) => {
-                break std::mem::replace(
-                    &mut *p.into_inner(),
-                    Box::new(crate::inventory::NullInventory),
-                );
-            }
-            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                eprintln!(
-                    "the old segment's inventory is locked by its straggler; continuing without inventory"
-                );
-                break Box::new(crate::inventory::NullInventory);
-            }
-        }
-    };
     Ok(Parts {
         cfg: arc.cfg.clone(),
         repo,
-        inventory,
     })
 }
 
@@ -2603,6 +2686,7 @@ impl PipelineController {
         ControlStatus {
             live: st.live,
             content_class: st.class,
+            content_classes: status_class_map(st.class, st.window.0, st.window.1),
             center_hz: st.window.0,
             sample_rate_hz: st.window.1,
             segment: st.segment,
@@ -2635,6 +2719,10 @@ impl PipelineController {
                 "replumb_failures": get(&stats.replumb_failures),
                 "capture_recoveries": get(&stats.capture_recoveries),
                 "segments_salvaged": get(&stats.segments_salvaged),
+                // T-941: threads of an earlier segment left behind past `REPLUMB_JOIN_BOUND`. A
+                // straggler no longer costs the run its inventory, but it is still a thread that
+                // did not stop, and this is where a client can see that it happened.
+                "workers_abandoned": get(&stats.workers_abandoned),
                 // T-541: pipeline threads that ended by panicking. Always a defect, and served
                 // rather than kept internal for the same reason as `window_settle_timeouts`:
                 // a fault the system handled is still a fault the operator should be able to see.
@@ -2825,15 +2913,61 @@ impl PipelineController {
 #[doc(hidden)]
 pub struct SegmentHold(#[allow(dead_code)] Arc<Shared>);
 
+/// **Test seam (T-941).** The run's inventory held *locked*, from a thread that also holds the
+/// running segment's state — a straggler caught inside an `Inventory` call, which is the state the
+/// live report was taken in ([`Common::inventory`]). Dropping it releases both.
+#[doc(hidden)]
+pub struct InventoryHold {
+    release: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for InventoryHold {
+    fn drop(&mut self) {
+        self.release.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 /// A running pipeline.
 pub struct PipelineHandle {
     sup: Arc<Supervisor>,
     thread: Option<JoinHandle<Finished>>,
     started: Instant,
-    /// The run's recipe runtime (T-088), created on first use.
-    recipes: std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+    /// The run's recipe runtime (T-088), created on first use. Shared (rather than owned) so a
+    /// service handed out by this handle — the `listen` opener's recipe path, T-869 — can build
+    /// it later without holding the handle.
+    recipes: Arc<std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>>,
     /// T-891: accessory-fed VLF services attached to this run (none by default); stopped with it.
     vlf: Arc<crate::vlf::VlfServices>,
+}
+
+/// The run's recipe runtime, built on first use ([`PipelineHandle::recipe_runtime`]). A free
+/// function so a service can hold the cell and the supervisor instead of the handle.
+fn recipe_runtime_of(
+    sup: &Arc<Supervisor>,
+    cell: &std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+) -> Arc<crate::recipes::runtime::RecipeRuntime> {
+    Arc::clone(cell.get_or_init(|| {
+        let seg = Arc::clone(sup);
+        let builtin = std::env::var_os("HK_RECIPES_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
+                    .filter(|p| p.is_dir())
+            });
+        let rt = crate::recipes::runtime::RecipeRuntime::new(
+            Arc::clone(&sup.common.counters),
+            Arc::new(move || seg.lock().shared.clone()),
+            Arc::clone(&sup.common.listen),
+            crate::recipes::store::RecipeStore::new(builtin, sup.common.data_dir.join("recipes")),
+        );
+        // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
+        rt.attach_default_capture_store(&sup.common.data_dir);
+        rt
+    }))
 }
 
 /// Detection resolution of the run.
@@ -3134,6 +3268,11 @@ impl PipelineHandle {
         Arc::clone(&self.sup.common.scheduler)
     }
 
+    /// T-844: the run's C38 shadow stage (`/api/ml/*`); `None` when its store could not open.
+    pub fn ml(&self) -> Option<Arc<crate::ml::MlStage>> {
+        self.sup.common.ml.clone()
+    }
+
     /// The `ConfirmPolicy.synthesized` clause this run's inventory confirms under (T-884).
     ///
     /// The MAUTO attach step (`hk_pipeline::synth::attach`) is built outside the run's inventory
@@ -3163,6 +3302,12 @@ impl PipelineHandle {
     /// [`crate::vlf::VlfServices::attach`]. Empty unless an accessory was given.
     pub fn vlf(&self) -> Arc<crate::vlf::VlfServices> {
         Arc::clone(&self.vlf)
+    }
+
+    /// T-977: the last completed control-channel hunt pass, with the verdict on every channel it
+    /// looked at (`GET /api/trunking/cc-candidates`).
+    pub fn cc_verdicts(&self) -> Arc<crate::ccverdict::CcVerdictLog> {
+        Arc::clone(&self.sup.common.cc_verdicts)
     }
 
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while
@@ -3203,11 +3348,17 @@ impl PipelineHandle {
     /// the run's listen limits in force at each request ([`Self::set_listen_settings`]).
     pub fn listen_service(&self) -> Arc<crate::chains::listen::ListenManager> {
         let sup = Arc::clone(&self.sup);
-        Arc::new(crate::chains::listen::ListenManager::new(
-            Arc::clone(&self.sup.common.counters),
-            Arc::new(move || sup.lock().shared.clone()),
-            Arc::clone(&self.sup.common.listen),
-        ))
+        // T-869 (ADR-0015 §12.9 stage 4): the chooser's recipe path, wired lazily — the runtime
+        // is built only if a request actually goes down it (`HK_LISTEN_PIPELINE`).
+        let (rt_sup, cell) = (Arc::clone(&self.sup), Arc::clone(&self.recipes));
+        Arc::new(
+            crate::chains::listen::ListenManager::new(
+                Arc::clone(&self.sup.common.counters),
+                Arc::new(move || sup.lock().shared.clone()),
+                Arc::clone(&self.sup.common.listen),
+            )
+            .with_recipes(Arc::new(move || recipe_runtime_of(&rt_sup, &cell))),
+        )
     }
 
     /// The run's detection FFT override (`PipelineSettings::fft_len`; `None` sizes it per rate).
@@ -3298,27 +3449,7 @@ impl PipelineHandle {
     /// `$HK_RECIPES_DIR` or the repository's `recipes/`; user versions live in
     /// `<data dir>/recipes/`.
     pub fn recipe_runtime(&self) -> Arc<crate::recipes::runtime::RecipeRuntime> {
-        Arc::clone(self.recipes.get_or_init(|| {
-            let sup = Arc::clone(&self.sup);
-            let builtin = std::env::var_os("HK_RECIPES_DIR")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
-                        .filter(|p| p.is_dir())
-                });
-            let rt = crate::recipes::runtime::RecipeRuntime::new(
-                Arc::clone(&self.sup.common.counters),
-                Arc::new(move || sup.lock().shared.clone()),
-                Arc::clone(&self.sup.common.listen),
-                crate::recipes::store::RecipeStore::new(
-                    builtin,
-                    self.sup.common.data_dir.join("recipes"),
-                ),
-            );
-            // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
-            rt.attach_default_capture_store(&self.sup.common.data_dir);
-            rt
-        }))
+        recipe_runtime_of(&self.sup, &self.recipes)
     }
 
     /// The run's decoded-stream capture store (T-092): every pipeline's inspector output is
@@ -3332,6 +3463,48 @@ impl PipelineHandle {
     #[doc(hidden)]
     pub fn hold_segment(&self) -> Option<SegmentHold> {
         self.sup.lock().shared.clone().map(SegmentHold)
+    }
+
+    /// **Test seam (T-941).** Holds the **run's inventory locked**, from a thread that also holds
+    /// the running segment's state — a straggler caught inside an `Inventory` call, the state
+    /// T-941's live report was taken in. Drop the hold to release both.
+    ///
+    /// Deterministic on purpose: it returns only once the lock is really held, so a test never
+    /// depends on winning a race with a writer, and `None` if it could not be taken within
+    /// [`UNWRAP_BOUND`] (which would make the test vacuous rather than red).
+    #[doc(hidden)]
+    pub fn hold_inventory(&self) -> Option<InventoryHold> {
+        let shared = self.sup.lock().shared.clone()?;
+        let release = Arc::new(AtomicBool::new(false));
+        let held = Arc::new(AtomicBool::new(false));
+        let (r, h) = (Arc::clone(&release), Arc::clone(&held));
+        let thread = thread::Builder::new()
+            .name("test-inventory-hold".into())
+            .spawn(move || {
+                // Holds the segment's `Arc` *and* its inventory lock, as a straggler does.
+                let _guard = shared
+                    .inventory
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                h.store(true, Ordering::SeqCst);
+                while !r.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            })
+            .ok()?;
+        let deadline = Instant::now() + UNWRAP_BOUND;
+        while !held.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                release.store(true, Ordering::SeqCst);
+                let _ = thread.join();
+                return None;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Some(InventoryHold {
+            release,
+            thread: Some(thread),
+        })
     }
 
     /// **Test seam (T-508).** The next `n` segment starts fail at their last step (every reader
@@ -3378,6 +3551,11 @@ impl PipelineHandle {
     /// classifications.
     pub fn receiver_survey(&self) -> Arc<crate::survey::ReceiverSurvey> {
         Arc::clone(&self.sup.common.receiver)
+    }
+
+    /// The run's 8VSB television survey (T-979): what it has measured, and how often.
+    pub fn atsc_survey(&self) -> Arc<crate::atsc::AtscSurvey> {
+        Arc::clone(&self.sup.common.atsc)
     }
 
     /// The run's C36 L1 dwell service (T-322): what C04 granted, what acquisition found, and how
@@ -3513,7 +3691,23 @@ impl PipelineHandle {
             detections_stored,
             emitters,
             always_on_lost_samples: lost,
-            counters: counters.to_json(),
+            counters: {
+                let mut c = counters.to_json();
+                let o = common.region_spectrum.stats();
+                if let Some(m) = c.as_object_mut() {
+                    m.insert(
+                        "overlap".into(),
+                        serde_json::json!({
+                            "requested": o.requested,
+                            "published": o.published,
+                            "measured": o.measured,
+                            "publish_nanos": o.publish_nanos,
+                            "measure_nanos": o.measure_nanos,
+                        }),
+                    );
+                }
+                c
+            },
             errors,
         })
     }

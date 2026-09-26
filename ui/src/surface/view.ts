@@ -24,7 +24,10 @@
 // radio; a pan is a pan (retune is T-444).
 
 import type { ActiveWindow } from "../navigators";
-import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
+import {
+  SurfaceChrome, readoutOf,
+  type Readout, type RowActionFor, type RowDeviceFor, type StatusFor, type WidthActionsFor,
+} from "./chrome";
 import type { Box, Lattice, LatticeSet } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
@@ -33,11 +36,11 @@ import {
 import { OverlayPass } from "./overlay";
 import { TracePass } from "./tracepass";
 import type { TracePath } from "./trace";
-import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type PaneStatus } from "./panes";
+import { PaneModel, levelDivergenceNote, paneStatuses, type Divider, type FreqWindow, type PaneStatus } from "./panes";
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
 import { rulerLabel } from "./ticks";
-import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type PaneRuler } from "./hud";
+import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type HudReserve, type PaneRuler } from "./hud";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -68,6 +71,14 @@ export interface SurfaceViewOptions {
   /** The press, naming which preset (its opaque `key`). A discrete click; nothing here reads a
    * pointer stream. */
   onWidthAction?: ((paneId: string, key: string) => void) | null;
+  /** A viewport's status line (T-1028), re-asked every frame for the same reason `chromeAction` is:
+   * it says what is happening to the window on screen NOW, and a poll-produced sentence would be
+   * about a window the pane has left. Strings only — this file learns nothing about tuning. */
+  chromeStatus?: StatusFor | null;
+  /** The device pill on each pane's chrome row (T-1006) — whose coverage decides that pane's grey.
+   * Asked every frame like the rest of the row, so a pane whose device was just picked, or whose
+   * front end has just gone, says so in the same frame the grey changes. */
+  rowDevice?: RowDeviceFor | null;
   /** Draw the overlay pass. A user preference — **not** what keeps the data pass untinted. */
   overlays?: boolean;
   overlayStyle?: OverlayStyle;
@@ -120,6 +131,13 @@ export interface SurfaceViewOptions {
   hud?: HTMLElement | null;
   /** The chrome's fade, `0..1`, asked every frame; the ticks' ink is multiplied by it. Default 1. */
   hudAlpha?: (() => number) | null;
+  /**
+   * T-997: the floating chrome's top-left column, in CSS px from the canvas's top-left, asked once
+   * per frame BEFORE any DOM write of this frame (so the read costs at most one layout, never a
+   * read-write thrash). A time label that would print into it is dropped — the chrome is docked
+   * down the same left edge the time ruler runs down. `null` reserves nothing.
+   */
+  hudReserve?: (() => HudReserve | null) | null;
   /**
    * **Band-1 DOM marks** (T-809, `./pins.ts`): called once per frame, after the overlays and the
    * HUD, with the SAME pane views the data pass was handed — so a DOM mark is placed by the very
@@ -183,6 +201,10 @@ export class SurfaceView {
   private readonly chromeAction: RowActionFor | null;
   /** Per-viewport width presets, re-asked every frame (T-496). Null when the host offers none. */
   private readonly widthActions: WidthActionsFor | null;
+  /** Per-viewport status line, re-asked every frame (T-1028). Null when the host states none. */
+  private readonly chromeStatus: StatusFor | null;
+  /** Per-viewport device pill, re-asked every frame (T-1006). Null when the host offers none. */
+  private readonly rowDevice: RowDeviceFor | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
@@ -197,6 +219,7 @@ export class SurfaceView {
   hudAxes: boolean;
   private readonly hud: HudAxes | null;
   private readonly hudAlpha: (() => number) | null;
+  private readonly hudReserve: (() => HudReserve | null) | null;
   private readonly dom: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
 
   constructor(opts: SurfaceViewOptions) {
@@ -207,6 +230,7 @@ export class SurfaceView {
     this.hudAxes = opts.hudAxes ?? !!opts.hud;
     this.hud = opts.hud ? new HudAxes(opts.hud) : null;
     this.hudAlpha = opts.hudAlpha ?? null;
+    this.hudReserve = opts.hudReserve ?? null;
     this.dom = opts.dom ?? null;
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattices ?? opts.lattice, opts.cache, opts.surface ?? {});
@@ -216,11 +240,15 @@ export class SurfaceView {
       bounds: opts.bounds, lattice: opts.lattice, freq: opts.freq, spanNs: opts.spanNs, device: opts.device,
     });
     this.minimap = new Minimap({ bounds: opts.bounds, lattice: opts.lattice });
-    this.minimapPx = opts.minimapPx ?? 96;
+    // T-995: 0 by default — the minimap is retired from the app (user, 2026-09-25). The strip
+    // survives only for the `/surface.html` dev preview and the unit tests that pass a height.
+    this.minimapPx = opts.minimapPx ?? 0;
     this.overlays = opts.overlays ?? true;
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
     this.widthActions = opts.widthActions ?? null;
+    this.chromeStatus = opts.chromeStatus ?? null;
+    this.rowDevice = opts.rowDevice ?? null;
     this.chrome = opts.chrome
       ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null, opts.onWidthAction ?? null)
       : null;
@@ -238,7 +266,8 @@ export class SurfaceView {
    * `windows` is the backend's list of currently-active capture windows; `[]` means none was
    * reported, and then no segment is lit.
    */
-  frame(edgeNs: number, windows: readonly ActiveWindow[] = []): SurfaceFrame {
+  /** The canvas area the panes are laid out in: its width, height and the GL `y` it starts at. */
+  private paneArea(): { w: number; paneH: number; inset: number; mapH: number } {
     const w = this.canvas.width, hPx = this.canvas.height;
     // The minimap takes a strip along the bottom of the SAME canvas — it is a viewport on this
     // surface, so it is laid out in this surface's pixels, not in a widget of its own.
@@ -248,6 +277,34 @@ export class SurfaceView {
     const insetTop = Math.max(0, Math.min(Math.floor(this.insetTopPx), Math.floor(hPx / 3)));
     const mapH = Math.max(0, Math.min(Math.floor(this.minimapPx), Math.floor((hPx - inset - insetTop) / 2)));
     const paneH = Math.max(1, hPx - inset - insetTop - mapH);
+    return { w, paneH, inset, mapH };
+  }
+
+  /**
+   * T-1005: every pane's whole rectangle (its trace strip included) in canvas GL device px, from the
+   * layout as it stands NOW — not the last frame's, which after a split or close is stale. Used to
+   * find the pane under the pointer after a close.
+   */
+  paneRects(): Map<string, PaneRect> {
+    const a = this.paneArea();
+    const out = new Map<string, PaneRect>();
+    for (const [id, r] of this.panes.rects(a.w, a.paneH)) out.set(id, { ...r, y: r.y + a.inset + a.mapH });
+    return out;
+  }
+
+  /** T-1005: the layout's dividers in canvas GL device px, laid out exactly as [[frame]] lays out
+   * the panes this frame (so a drag handle placed from them sits in the gap between the panes). */
+  dividers(): Divider[] {
+    const a = this.paneArea();
+    const dy = a.inset + a.mapH;
+    return this.panes.dividers(a.w, a.paneH).map((d) => ({
+      ...d, parent: { ...d.parent, y: d.parent.y + dy }, rect: { ...d.rect, y: d.rect.y + dy },
+    }));
+  }
+
+  frame(edgeNs: number, windows: readonly ActiveWindow[] = []): SurfaceFrame {
+    const { w, paneH, inset, mapH } = this.paneArea();
+    const hPx = this.canvas.height;
     this.panes.setViewport(w, paneH);
     // The map is laid out in the same pixels, and it needs them for the same reason the panes do:
     // T-486's dead zone is a number of *device pixels*, so a viewport that does not know its own
@@ -289,6 +346,17 @@ export class SurfaceView {
     if (this.marks) {
       for (const v of paneViews) {
         const q = this.marks(v, edgeNs);
+        if (q.length) paneQuads.push({ rect: v.rect, quads: q });
+      }
+    }
+    // T-995: with no map strip (the app's shape since the user retired the minimap, 2026-09-25 —
+    // the whole spectrum is reached by zooming a pane out, Google-Maps style), the one thing only
+    // the map drew — a lit segment per reported active capture window, per SDR — is drawn in each
+    // pane instead, through the same function and the same pane mapping: at the live edge when the
+    // pane shows it, omitted (never clamped) where the window is off the pane. Nothing is lost.
+    if (!mapRect) {
+      for (const v of paneViews) {
+        const q = liveSegmentQuads(windows, edgeNs, v.box, v.rect, this.overlayStyle);
         if (q.length) paneQuads.push({ rect: v.rect, quads: q });
       }
     }
@@ -335,6 +403,7 @@ export class SurfaceView {
     };
     const readout = readoutOf(
       statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor, this.widthActions,
+      this.chromeStatus, this.rowDevice,
     );
     this.chrome?.update(readout);
 
@@ -348,15 +417,16 @@ export class SurfaceView {
       const cssW = this.canvas.clientWidth;
       const dpr = cssW > 0 ? w / cssW : 1;
       const alpha = this.hudAlpha ? this.hudAlpha() : 1;
+      const reserve = this.hudReserve ? this.hudReserve() : null;
       const labels: HudLabel[] = [];
       for (const v of paneViews) {
         const s = statusById.get(v.id);
         if (!s) continue;
         const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
         rulers.push(r);
-        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        const q = hudTickQuads(r, { alpha, majorPx: 5 * dpr, minorPx: 3 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
         if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
-        labels.push(...hudLabels(r, hPx, dpr));
+        labels.push(...hudLabels(r, hPx, dpr, reserve));
       }
       this.hud?.update(labels);
     }

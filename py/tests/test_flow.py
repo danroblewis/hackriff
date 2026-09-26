@@ -287,3 +287,14 @@ def test_remote_hosts_report_running_landed_and_the_mirrors_drift(tmp_path):
     # a batch gating on main: its provisional merges are not drift - measured against the bulk marker's base
     (ops / "bulk-in-progress").write_text(f"base={g('rev-parse', 'refs/remotes/node2/main')}\n")
     assert flow.remote_hosts(str(ops), str(repo))[0]["behind"] == 0
+    # invariant 29: the host tile's 'refs in sync: yes|no (N drifting)' - the work runner's status file, when it has one
+    assert (h["refs_in_sync"], h["drifting"]) == (None, None)
+    (ops / "work-runner-status.json").write_text(json.dumps({"hosts": {"node2": {"refs_in_sync": False, "drifting": 2}}}))
+    h = flow.remote_hosts(str(ops), str(repo))[0]
+    assert (h["refs_in_sync"], h["drifting"]) == (False, 2)
+
+
+def test_a_sync_error_is_a_touchpoint(tmp_path):
+    """Invariant 29: a hand-back held because the host, its mirror and this Mac disagree is a person's to resolve."""
+    (tmp_path / "work-needs-attention.txt").write_text("09-25 11:00  task-t9  T-9  SYNC_ERROR  task-t9: node2 worktree a, mirror b\n")
+    assert len(flow.touchpoints(str(tmp_path), datetime(2026, 9, 25, 0), datetime(2026, 9, 25, 12))) == 1
