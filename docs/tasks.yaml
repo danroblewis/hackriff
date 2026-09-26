@@ -27485,7 +27485,8 @@ tasks:
   - id: T-921
     milestone: MAUTO
     title: Re-measure the confirm false-positive rate with T-577's harness driving the REAL CheckTally (and assist::codes on the new count); lower min_check_width to 8 only if the measurement allows (T-575 residue)
-    status: todo
+    status: in-progress
+    branch: task-t921
     priority: normal
     deps:
     - T-575
@@ -28542,7 +28543,8 @@ tasks:
   - id: T-965
     milestone: MSCAN
     title: Scan everything finds 0 FM rows, every row has null SNR/family, and a pass takes 237 s against a stated 125 s
-    status: todo
+    status: in-progress
+    branch: task-t965
     priority: P1
     deps:
     - T-941
