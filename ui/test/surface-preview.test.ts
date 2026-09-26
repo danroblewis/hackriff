@@ -168,7 +168,12 @@ test("a nearly-empty first screen arrives already explained, with a number rathe
   const c = observedExtent(coverage(128, 32, { f0: 0, f1: 0, t0: 0, t1: 24 }));
   assert.ok(c.observed > 0 && c.observed / c.total < 0.01);
   const note = orientationNote(c, openingWindow(BOUNDS, c.box));
-  assert.match(note, /0\.6 % of this surface was ever sampled/, "the share is stated, not rounded away");
+  // T-964: the *headline* share is the frequency axis — "ever sampled" is a question about where
+  // the radio looked, not about when — and the cell share is stated beside it, because that is what
+  // the surface draws. One band of 128 was sampled (0.8 %); 25 of 4096 cells are measurement (0.6 %).
+  assert.match(note, /0\.8 % of this surface was ever sampled/, "the share is stated, not rounded away");
+  assert.match(note, /1 of 128 frequency cells ever sampled in this window/);
+  assert.match(note, /0\.6 % of its 4096 time × frequency cells/, "what the surface draws is stated too");
   assert.match(note, /grey means nothing ever looked there/i);
   assert.equal(fmtShare(6, 100_000), "0.006 %");
   assert.equal(fmtShare(0, 100), "0 %");
@@ -176,6 +181,59 @@ test("a nearly-empty first screen arrives already explained, with a number rathe
   // Nothing observed anywhere: the note must still explain the grey rather than read as a failure.
   const blank = orientationNote(observedExtent(coverage(8, 8, null)), openingWindow(BOUNDS, null));
   assert.match(blank, /not a loading state and not a failure/);
+});
+
+/** A completed survey pass: the radio steps across the WHOLE frequency axis, one window at a time,
+ * so cell `(f, t)` is sampled exactly where the pass reached `f` — a thin diagonal of the grid. */
+function sweptPass(nf: number, nt: number) {
+  const cells: { state: string }[] = [];
+  for (let t = 0; t < nt; t++) {
+    for (let f = 0; f < nf; f++) {
+      cells.push({ state: Math.floor((f * nt) / nf) === t ? "observed" : "unobserved" });
+    }
+  }
+  return {
+    grid: { cells: nf, rows: nt, f_lo_hz: 1e6, f_cell_hz: (6e9 - 1e6) / nf, t0_s: T0, t_cell_s: 1 },
+    any: { cells },
+  };
+}
+
+test("T-964: a FINISHED full-range pass reads as the whole range sampled, not as 3 % of a grid", () => {
+  // The measured defect: `Scan everything (fast)` completed a 1 MHz-6 GHz pass and the banner said
+  // "4.3 % of this surface was ever sampled (176 of 4096 coverage cells)" — true of the 128 x 32
+  // grid, and read as the survey having lit nothing. The pass visited EVERY frequency cell; what it
+  // cannot do is visit them all at the same instant, because a front end sees one window at a time.
+  const c = observedExtent(sweptPass(ORIENT_CELLS, ORIENT_ROWS));
+  assert.equal(c.bands.total, ORIENT_CELLS);
+  assert.equal(c.bands.observed, ORIENT_CELLS, "every frequency cell was sampled at some instant");
+  assert.equal(c.bands.unobserved, 0);
+  assert.equal(c.observed, ORIENT_CELLS, "and only 128 of the 4096 (time x frequency) cells are measurement");
+
+  const note = orientationNote(c, openingWindow(BOUNDS, c.box));
+  assert.match(note, /100 % of this surface was ever sampled/,
+    "the survey's own share must be the headline: a completed pass that reads '3 %' is the T-964 defect");
+  assert.match(note, /128 of 128 frequency cells ever sampled/);
+  // The second number is not dropped: a user reading 100 % over a mostly-grey canvas needs to know
+  // why, and the reason is the time axis.
+  assert.match(note, /3\.1 % of its 4096 time × frequency cells/);
+  assert.match(note, /one window at a time/);
+});
+
+test("T-964: the route's own `bands` census is preferred over folding the grid here", () => {
+  // The backend serves the collapse (`GET /api/coverage` -> `any.bands`), with the vocabulary rule
+  // attached to it; this client quotes it. The fold above is only for an answer that has none, so
+  // an older server still gets the right sentence rather than the wrong one.
+  const cov = sweptPass(8, 4) as ReturnType<typeof sweptPass> & { any: { bands?: unknown } };
+  cov.any.bands = {
+    cells: 8, observed_cells: 5, excluded_cells: 1, unobserved_cells: 1, unknown_cells: 1,
+  };
+  const c = observedExtent(cov);
+  assert.deepEqual(c.bands, { observed: 6, unobserved: 1, unknown: 1, total: 8 },
+    "`excluded` is sampled spectrum (T-595), so it counts as sampled; `unknown` is neither");
+  assert.equal(c.observed, 8, "the per-cell census is unchanged — the two answer different questions");
+  const note = orientationNote(c, openingWindow(BOUNDS, c.box));
+  assert.match(note, /75 % of this surface was ever sampled/);
+  assert.match(note, /past the record horizon/, "the forgotten share is stated against the same axis");
 });
 
 // ——— 2. the requests the client actually builds (the T-367 guard) ———
@@ -212,7 +270,10 @@ test("probeSurface asks exactly five read-only routes, in dependency order", asy
   // The refinement decides where to OPEN; the note's share stays the surface-wide one, because it
   // is a statement about the whole surface and the refined pass measures inside coverage.
   assert.deepEqual(p.census, surfaceWide);
-  assert.match(p.note, new RegExp(`${surfaceWide.observed} of ${surfaceWide.total} coverage cells`));
+  // T-964: the surface-wide census, stated on both axes — the frequency cells the survey reached and
+  // the (time x frequency) cells the canvas draws.
+  assert.match(p.note, new RegExp(`${surfaceWide.bands.observed} of ${surfaceWide.bands.total} frequency cells`));
+  assert.match(p.note, new RegExp(`of its ${surfaceWide.total} time . frequency cells`));
   assert.ok(p.opening.freq.spanHz < surfaceWide.box!.f1Hz - surfaceWide.box!.f0Hz,
     "the refinement did not narrow the opening window: a coarse cell is 51.2 MHz on a 6.5 GHz surface");
 });

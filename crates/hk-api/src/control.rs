@@ -275,13 +275,29 @@ impl CaptureStatus {
     }
 }
 
+/// One sub-band of the tuned window's content-class map (T-991): `[lo_hz, hi_hz]`, its class,
+/// and why (the restricted band's 47 CFR source, the band prior, or none).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassBand {
+    /// Lower edge, Hz.
+    pub lo_hz: f64,
+    /// Upper edge, Hz.
+    pub hi_hz: f64,
+    /// The sub-band's class.
+    pub content_class: ContentClass,
+    /// Where the class comes from.
+    pub source: String,
+}
+
 /// The running pipeline as the control API sees it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunState {
     /// Device settings can change (a live source).
     pub live: bool,
-    /// Content class in force.
+    /// Content class in force for the whole window (the summary of `content_classes`).
     pub content_class: ContentClass,
+    /// The window's content classes per sub-band (T-991).
+    pub content_classes: Vec<ClassBand>,
     /// Requested centre, Hz.
     pub center_hz: f64,
     /// Requested sample rate, Hz.
@@ -1399,6 +1415,13 @@ fn run_json(r: &RunState) -> Value {
         "live": r.live,
         "content_class": class_json(r.content_class),
         "content_permitted": r.content_class.permits_content(),
+        "content_classes": r.content_classes.iter().map(|b| json!({
+            "lo_hz": b.lo_hz,
+            "hi_hz": b.hi_hz,
+            "content_class": class_json(b.content_class),
+            "content_permitted": b.content_class.permits_content(),
+            "source": b.source,
+        })).collect::<Vec<_>>(),
         "center_hz": r.center_hz,
         "sample_rate_hz": r.sample_rate_hz,
         "segment": r.segment,

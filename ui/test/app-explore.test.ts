@@ -19,6 +19,7 @@ import {
   setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
   type Classification, type Row, FALLBACK_ROWS,
 } from "../src/app/explore/inventory";
+import { rasterText } from "../src/app/explore/format";
 import { ARTIFACT_MARK, CANDIDATE_MARK, CONFIRMED_MARK, signalMarkBoxes } from "../src/surface/marks";
 import * as ax from "../src/axis";
 
@@ -100,6 +101,25 @@ test("rowChips: known family, unknown family, off-raster flag", () => {
   );
   const flagged = makeRow({ explanations: [{ rank: 1, service: "fm-broadcast", label: "FM broadcast, off raster", score: 0.7, evidence_confidence: 0.7, status_evidence_confidence: 0, status: "known", prior_ref: null, flags: ["off-raster"], evidence: [] }] });
   assert.deepEqual(rowChips(flagged), [{ cls: "known", text: "wfm-broadcast" }, { cls: "flag", text: "off raster" }]);
+});
+
+// T-990: an emission with nothing measured behind it is now topped by `unidentified`, so the
+// backend carries the raster verdict it displaced onto that rank-1 row. The client reads
+// `explanations[0]` for both the chip and the Channel raster line, and the product rule is that a
+// mismatch is flagged, never dropped -- so this pins the wire shape the chip depends on.
+test("rowChips / rasterText: an off-raster station keeps its flag when rank 1 is `unidentified` (T-990)", () => {
+  const unidentified = {
+    rank: 1, service: "unidentified", label: "Unidentified emission", score: 1,
+    evidence_confidence: 0, status_evidence_confidence: 0, status: "unknown", prior_ref: null,
+    flags: ["no-measured-support", "off-raster"],
+    evidence: [
+      { kind: "occupancy", bandwidth_hz: 183_000, support: "measurement-unavailable", reason: "nothing measured about this emission names a service" },
+      { kind: "raster", raster_hz: 200_000, nearest_channel_hz: 101_300_000, offset_hz: -47_000, tolerance_hz: 2_000, on_raster: false, source: "47 CFR 73.201", center_source: "detected" },
+    ],
+  };
+  const row = makeRow({ family: null, classification: null, explanations: [unidentified] as Row["explanations"] });
+  assert.deepEqual(rowChips(row), [{ cls: "unknown", text: "unknown" }, { cls: "flag", text: "off raster" }]);
+  assert.equal(rasterText(row.explanations[0]?.evidence ?? []), "47 kHz off raster");
 });
 
 test("clusterChip: names the group and says the rows measure alike — never 'duplicate' (T-320)", () => {
