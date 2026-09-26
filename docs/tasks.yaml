@@ -30886,7 +30886,7 @@ tasks:
   - id: T-1051
     milestone: MMAP
     title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
-    status: in-progress
+    status: done
     branch: task-t1051
     priority: high
     deps: []
@@ -30905,6 +30905,7 @@ tasks:
       2026-09-26 coordinator: the UI-stack integrator also saw app-trace fail IDENTICALLY on main 1090f468 (fresh hk, alone): the T-475 afterglow test and 'the trace is the spectrum at the viewport's time position' - besides heldObservation. Note T-1041 made the trace a layer OFF by default: a spec that asserts the trace must switch the layer on through the product's own control first. Own all app-trace reds on main here (or say which are a different defect).
 
       2026-09-26 coordinator: the handback (c635e59c) fixes the product defect (a following pane's trace = the newest row, liveFrameFits) and every app-trace test but the afterglow-while-scrubbed park, which is split to T-1074. T-1051 closes on c635e59c once merged onto the UI stack (conflicts with T-996's app-trace.e2e.mjs/surface.ts).
+    commit: c88c5de9
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
