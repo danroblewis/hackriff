@@ -31784,7 +31784,8 @@ tasks:
   - id: T-1082
     milestone: MLIVE
     title: "RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)"
-    status: todo
+    status: in-progress
+    branch: task-t1082
     priority: P1
     deps: []
     parallel_group: UI-LSR-METRICS
