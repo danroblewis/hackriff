@@ -388,3 +388,72 @@ fn decode_route_resolves_a_merged_id_to_its_survivor() {
     assert_eq!(decodes.len(), 1, "{v}");
     assert_eq!(decodes[0]["frame_model"], json!("rds-group"), "{v}");
 }
+
+/// T-962: an identity-less emitter serves the **provisional** identity rows linked to it — a PI
+/// recorded below its vote bar, with no identity column — so the panel can show "PI 1704
+/// (3 groups, provisional)". A linked row that is not a provisional reading is not served, and a
+/// withheld identity is untouched by this (the route's `Withheld` arm).
+#[test]
+fn an_identity_less_emitter_serves_its_linked_provisional_identity_rows() {
+    let (server, seeded, repo) = serve_seeded();
+    let addr = server.local_addr();
+    let provisional = |frame_model: &str, t_s: i64, votes: u32| Decode {
+        identity: None,
+        ..rds_decode(
+            frame_model,
+            t_s,
+            json!({"group_type": 0, "identity_provisional": true,
+                   "identity_scheme": "rds-pi", "identity_value": "1704",
+                   "identity_votes": votes, "identity_votes_needed": 10}),
+            None,
+        )
+    };
+    {
+        let mut repo = repo.lock().unwrap();
+        for d in [
+            provisional("rds-group", T0 + 1, 2),
+            provisional("rds-group", T0 + 2, 3),
+            // Linked, no identity, but not a provisional reading: not this route's to serve.
+            Decode {
+                identity: None,
+                ..rds_decode("rds-other", T0 + 3, json!({"x": 1}), None)
+            },
+        ] {
+            repo.insert_decode(&d).unwrap();
+            repo.link_emitter(&hk_model::EmitterLink {
+                emitter_id: seeded.carrier,
+                target: hk_model::LinkTarget::Decode(d.id),
+                linked_at: d.t,
+            })
+            .unwrap();
+        }
+    }
+    let (status, v) = authed(addr, &format!("/api/inventory/{}/decode", seeded.carrier));
+    assert_eq!(status, 200, "{v}");
+    let decodes = v["decodes"].as_array().unwrap();
+    assert_eq!(decodes.len(), 1, "[T-962] one provisional frame model: {v}");
+    let f = &decodes[0]["fields"];
+    assert_eq!(decodes[0]["at"], json!((T0 + 2) as f64), "latest wins: {v}");
+    assert_eq!(f["identity_provisional"], json!(true), "{v}");
+    assert_eq!(f["identity_value"], json!("1704"), "{v}");
+    assert_eq!(
+        (
+            f["identity_votes"].clone(),
+            f["identity_votes_needed"].clone()
+        ),
+        (json!(3), json!(10)),
+        "[T-962] 'PI 1704 (3 groups, provisional)' is readable: {v}"
+    );
+    // The window still applies.
+    let (status, v) = authed(
+        addr,
+        &format!(
+            "/api/inventory/{}/decode?t0={}&t1={}",
+            seeded.carrier,
+            T0,
+            T0 + 1
+        ),
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["decodes"][0]["fields"]["identity_votes"], json!(2), "{v}");
+}
