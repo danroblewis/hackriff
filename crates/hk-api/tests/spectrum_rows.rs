@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hk_api::spectrum_rows::{
-    BLOCK_HEADER_BYTES, FLAG_DISCONTINUITY, FLAG_FINAL, KIND_ROWS, KIND_UNOBSERVED, NO_LEVEL,
-    TRAILER_RUN8, VALUES_F16_LE,
+    BLOCK_HEADER_BYTES, FLAG_DISCONTINUITY, FLAG_FINAL, KIND_ROWS, KIND_UNOBSERVED, MAX_GAP_ROWS,
+    NO_LEVEL, TRAILER_RUN8, VALUES_F16_LE,
 };
 use hk_api::{ApiState, Server, ServerConfig, Token};
 use hk_model::attention::baseline::SiteKey;
@@ -165,6 +165,15 @@ impl Fixture {
         self.obs
             .append(&dwell(seq, lo, hi, from * self.t_cell, to * self.t_cell));
         self.obs.flush();
+    }
+
+    /// Seals history through row `row`, so the blocks behind it are `final`.
+    fn seal(&self, row: i64) {
+        self.history
+            .lock()
+            .unwrap()
+            .seal_through(Timestamp::from_unix_nanos(row * self.t_cell))
+            .unwrap();
     }
 
     /// The pane path: the fixture's whole band, `nf` columns, and a range in **capture time**.
@@ -646,6 +655,31 @@ fn an_unobserved_stretch_is_one_block_with_no_payload_and_no_level() {
     assert!(b.rows >= 4096, "one message spans the whole grey: {b:?}");
 }
 
+/// **The grey probe doubles, and each block states exactly the rows the cursor advanced.** A client
+/// reads `row0 + rows` as the next row it expects, so an understated count would be a hole with
+/// nothing marking it — which is what `MAX_GAP_ROWS` caps (`next_gap_span`, unit-tested beside it:
+/// past a few years of silence the coverage record answers `unknown` rather than `unobserved`, so a
+/// fixture cannot walk far enough to reach the cap itself).
+#[test]
+fn the_grey_probe_doubles_and_each_block_states_the_rows_it_advanced() {
+    const FIRST: i64 = 20_000;
+    let f = Fixture::build("grey-double", 0, 0, None);
+    f.tune(2, 0.0, f.f_hi, FIRST, FIRST + 128);
+    f.record(FIRST, 64);
+    let mut ws = connect(f.addr(), &f.path(CELLS, "&t_from=0"));
+    subscribed(&mut ws);
+    let a = block(&mut ws).expect("the first grey block");
+    let b = block(&mut ws).expect("the second grey block");
+    for g in [&a, &b] {
+        assert_eq!(g.kind, KIND_UNOBSERVED, "{g:?}");
+        assert!(i64::from(g.rows as u32) <= MAX_GAP_ROWS, "{g:?}");
+    }
+    assert_eq!(a.row0, 0, "{a:?}");
+    assert_eq!(a.rows, 4096, "the first probe spans GAP_PROBE_ROWS: {a:?}");
+    assert_eq!(b.row0, 4096, "contiguous: the count is the advance: {b:?}");
+    assert_eq!(b.rows, 8192, "and it doubled: {b:?}");
+}
+
 /// **The epoch holds while the tuning does, and increments when it changes.** A dwell that goes on
 /// is filed record after record with the same configuration and must not read as a retune; a dwell
 /// over a different band under the pane must.
@@ -696,6 +730,117 @@ fn the_epoch_holds_across_a_continuing_dwell_and_increments_on_a_retune() {
         seen.windows(2).any(|w| w[0].1 != w[1].1),
         "the epoch changes at a block boundary, once: {seen:?}"
     );
+}
+
+/// **`DISCONTINUITY` marks every part the store did not have** — which is the whole point of the
+/// flag: those are the rows the client fills from tiles (`/api/tiles` is the authority there, and
+/// LSR-3's reconnect reads exactly this mark).
+///
+/// The fixture is a tuned band with a **hole in the recording**: rows 0..64 and 72..192 are in the
+/// store, rows 64..72 are not, and the tune record covers all of it — so coverage says the radio was
+/// here, and the pyramid still has nothing for those eight rows. A flag computed from row addresses
+/// could not see that at all: the cursor's rows are contiguous throughout.
+#[test]
+fn discontinuity_marks_the_rows_the_store_did_not_have() {
+    let f = Fixture::build("gap", 64, 256, None);
+    f.record(72, 120); // rows 72..192; 64..72 is the hole
+    f.seal(192);
+    let mut ws = connect(
+        f.addr(),
+        &f.path(CELLS, &format!("&t_from=0&t_to={}", f.ns(192))),
+    );
+    subscribed(&mut ws);
+    let mut blocks = Vec::new();
+    let mut rows = 0;
+    while rows < 192 {
+        let b = block(&mut ws).expect("a block");
+        assert_eq!(b.kind, KIND_ROWS, "the band is tuned: not grey");
+        rows += b.rows;
+        // Rows the store had nothing for carry no value at all, in any column.
+        let empty: Vec<i64> = (0..b.rows)
+            .filter(|r| {
+                b.cells[r * b.nf..(r + 1) * b.nf]
+                    .iter()
+                    .all(Option::is_none)
+            })
+            .map(|r| b.row0 + r as i64)
+            .collect();
+        blocks.push((b.row0, b.rows, b.flags & FLAG_DISCONTINUITY != 0, empty));
+    }
+    // Three 64-row blocks: the first (nothing precedes it), the second (it holds the hole), and the
+    // third — which continues measured rows and holds none, so it is **not** marked. Without that
+    // last one the flag would be indistinguishable from "every block".
+    assert_eq!(blocks.len(), 3, "{blocks:?}");
+    assert_eq!(blocks[0].0, 0);
+    assert!(blocks[0].2, "the first block of a range continues nothing");
+    assert_eq!(blocks[0].3, Vec::<i64>::new(), "rows 0..64 are recorded");
+    assert_eq!(blocks[1].0, 64);
+    assert!(
+        blocks[1].2,
+        "rows 64..72 are not in the store, so the block is a discontinuity: {blocks:?}"
+    );
+    assert_eq!(blocks[1].3, (64..72).collect::<Vec<i64>>(), "{blocks:?}");
+    assert_eq!(blocks[2].0, 128);
+    assert!(
+        !blocks[2].2,
+        "a block that continues measured rows and holds no hole is NOT marked: {blocks:?}"
+    );
+    assert_eq!(blocks[2].3, Vec::<i64>::new(), "{blocks:?}");
+}
+
+/// **A grey stretch is a discontinuity too, and the block after it is marked** — the client has no
+/// values for either part, and the second is the far side of a gap the first opened.
+#[test]
+fn a_grey_stretch_is_marked_and_so_is_the_block_after_it() {
+    // Nothing tuned before row 4096; recorded and tuned from there.
+    let f = Fixture::build("grey-mark", 0, 0, None);
+    f.tune(2, 0.0, f.f_hi, 4096, 4224);
+    f.record(4096, 64);
+    f.seal(4160);
+    let mut ws = connect(f.addr(), &f.path(CELLS, "&t_from=0"));
+    subscribed(&mut ws);
+    let grey = block(&mut ws).expect("the grey stretch");
+    assert_eq!(grey.kind, KIND_UNOBSERVED);
+    assert!(
+        grey.flags & FLAG_DISCONTINUITY != 0,
+        "nothing looked here, so the row stream has no values for it: {grey:?}"
+    );
+    let after = block(&mut ws).expect("the first measured block");
+    assert_eq!(after.kind, KIND_ROWS);
+    assert_eq!(after.row0, grey.row0 + grey.rows as i64, "contiguous rows");
+    assert!(
+        after.flags & FLAG_DISCONTINUITY != 0,
+        "the far side of a gap is marked: {after:?}"
+    );
+}
+
+/// **A pane asking for finer cells than the store holds is told so.** The values are replicated
+/// across the pane's columns, the block says `replicated` on the frequency axis, and the tier drops
+/// to `survey-overview` — the honesty rule that the UI never implies detail that was not measured.
+#[test]
+fn a_pane_finer_than_the_store_replicates_and_says_so() {
+    let f = Fixture::build("replicated", 32, 32, Some(32));
+    // Two store cells wide, asked for in 64 columns: each store cell covers 32 of them.
+    let two_cells = f.f_hi * 2.0 / CELLS as f64;
+    let path = format!(
+        "/ws/spectrum/rows?token={TOKEN}&f_lo_hz=0&f_hi_hz={two_cells}&nf=64&t_from=0&t_to={}",
+        f.ns(8)
+    );
+    let mut ws = connect(f.addr(), &path);
+    subscribed(&mut ws);
+    let b = block(&mut ws).expect("a block");
+    assert_eq!(b.nf, 64);
+    assert_eq!(b.fold & 0b11, 2, "frequency replicated: {b:?}");
+    assert_eq!(b.tier, 2, "a replicated axis is survey-overview: {b:?}");
+    // The claim is exactly that: one measured cell repeated across 32 columns, not 32 measurements.
+    let row: Vec<Option<f32>> = b.cells[..b.nf].to_vec();
+    for half in [0usize, 1] {
+        let block_of_32 = &row[half * 32..(half + 1) * 32];
+        assert!(
+            block_of_32.windows(2).all(|w| w[0] == w[1]),
+            "columns inside one store cell hold one value: {block_of_32:?}"
+        );
+    }
 }
 
 /// Two panes on one server keep **their own edges** — one subscription per pane, not one per client.

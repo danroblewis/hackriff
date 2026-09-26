@@ -38,8 +38,14 @@
 //!   does.
 //! - **A stretch the coverage map calls uniformly unobserved is answered from the map alone**
 //!   (T-461), as one payload-less block over the whole stretch, with the probe span doubling while
-//!   the grey continues — so a pane opened over a band nothing ever tuned costs a few dozen small
-//!   messages rather than millions of empty rows.
+//!   the grey continues (capped at [`MAX_GAP_ROWS`], so `rows` always fits its field) — so a pane
+//!   opened over a band nothing ever tuned costs a few dozen small messages rather than millions of
+//!   empty rows.
+//! - **Every part the store did not have is marked `DISCONTINUITY`** ([`FLAG_DISCONTINUITY`]), so a
+//!   client knows exactly which rows to fill from tiles: a grey stretch, a row a tuned band has no
+//!   frame for, and the far side of any of those. The mark is about the **values** delivered, never
+//!   about row addresses — the cursor walks forward contiguously, so an address-only test would fire
+//!   on nothing but the first block.
 //!
 //! # The epoch
 //!
@@ -94,6 +100,17 @@ pub const MAX_BLOCK_CELLS: usize = 65_536;
 /// and a block is a patch of a ring texture rather than a tile.
 pub const MAX_BLOCK_ROWS: usize = 64;
 
+/// Rows one **`unobserved`** block may span, at most.
+///
+/// The grey probe doubles while it keeps finding grey ([`GAP_PROBE_ROWS`]), which is what lets a
+/// range starting at `t_from=0` reach the first recorded row in a few dozen messages. Uncapped, it
+/// doubles past `u32::MAX` after about twenty steps at a 40 ms row — and `rows` is a `u32` on this
+/// wire, so the block would then **state fewer rows than the cursor advanced** and a client reading
+/// `row0 + rows` would see a hole with nothing marking it. The cap makes that unrepresentable
+/// rather than clamped: 2³⁰ rows is ~1.4 years of grey in one message, so the doubling still costs a
+/// handful of messages from the epoch, and every `rows` fits its field exactly.
+pub const MAX_GAP_ROWS: i64 = 1 << 30;
+
 /// Pane subscriptions open at once, per server. Past it the handshake is refused `503`.
 ///
 /// The same bound as [`crate::rows::MAX_ROW_FEEDS`] and for the same reason, counted separately
@@ -112,7 +129,16 @@ pub const KIND_UNOBSERVED: u8 = 2;
 
 /// `flags` bit 0: no late frame can still land in this block (the watermark has passed its end).
 pub const FLAG_FINAL: u8 = 1 << 0;
-/// `flags` bit 1: this block does not continue the previous one sent on this subscription.
+/// `flags` bit 1: **this block is not a continuation of the values already delivered** — the rows
+/// before it were not sent as measurements on this subscription (the first block of a range, or the
+/// far side of a gap), or the block itself carries rows the store held no frame for (a grey stretch,
+/// or a tuned band with nothing recorded in it).
+///
+/// It is the mark a client fills from tiles: `/api/tiles` is the authority for a part the row stream
+/// did not carry, and LSR-3's reconnect (`t_from` = the last row in hand) reads exactly this flag to
+/// know which part that is. It is **not** "the row addresses skipped" — the cursor always walks
+/// forward contiguously, so a flag computed that way could only ever fire on a subscription's first
+/// block.
 pub const FLAG_DISCONTINUITY: u8 = 1 << 1;
 
 /// `values`: little-endian IEEE binary16, NaN = not measured (never a zero, never a floor).
@@ -129,6 +155,16 @@ pub const TRAILER_RUN8: u8 = 1;
 /// (`hk_api::coverage::COVERAGE_STATES`), because a code read against another alphabet is exactly
 /// the honesty failure the four states exist to prevent.
 pub const COVERAGE_STATES: [&str; 4] = ["unobserved", "observed", "unknown", "excluded"];
+
+/// The rows the **next** grey probe spans, given the one this probe used: the doubling of T-461's
+/// short-circuit, [`MAX_GAP_ROWS`]-capped so a block's `rows` always fits its `u32` field exactly.
+///
+/// Separate and named because the cap is the whole correctness of that field: uncapped, the doubling
+/// passes `u32::MAX` after about twenty steps and the header would state a clamped count while the
+/// cursor advanced the real one — a hole in the client's rows with nothing marking it.
+pub fn next_gap_span(span: i64) -> i64 {
+    span.saturating_mul(2).min(MAX_GAP_ROWS)
+}
 
 /// Bounds on how often a waiting subscription looks at the data edge (the tile route's, unchanged:
 /// one short lock hold to read two timestamps).
@@ -403,7 +439,8 @@ impl PaneSubscription {
                 reached it; FINAL says no late frame can still land in it. The range is the \
                 subscription — rows already recorded arrive at once, rows not yet recorded arrive \
                 as they are — and it ends at t_to (`end`) or never. Grey is each block's own \
-                coverage trailer, in the same four states /api/tiles serves.",
+                coverage trailer, in the same four states /api/tiles serves, and DISCONTINUITY marks \
+                every part the store did not have (fill it from /api/tiles).",
         })
     }
 }
@@ -433,9 +470,15 @@ pub struct PaneCursor {
     /// The epoch in force, and the configuration fingerprint it was computed from.
     epoch: u32,
     fingerprint: Option<u64>,
-    /// The row after the last one sent, so a block that does not continue it is marked
-    /// `DISCONTINUITY` rather than leaving the client to compare addresses.
-    sent_through: Option<i64>,
+    /// The row after the last one this subscription delivered **as a measurement** — the cursor's
+    /// own answer to "what does the client have values for?". `None` while nothing does.
+    ///
+    /// It is deliberately not "the last row sent": the cursor always walks forward contiguously, so
+    /// a flag computed from row addresses alone could only ever fire on the first block. What a
+    /// client needs marked is every part **the store did not have** — the grey stretches, and the
+    /// rows a tuned band has no frame for — because those are the parts it must fill from tiles
+    /// (`/api/tiles` is the authority there, and LSR-3's reconnect depends on the mark).
+    values_through: Option<i64>,
 }
 
 impl PaneCursor {
@@ -445,11 +488,11 @@ impl PaneCursor {
         Self {
             sub,
             next,
-            gap_span: GAP_PROBE_ROWS,
+            gap_span: GAP_PROBE_ROWS.min(MAX_GAP_ROWS),
             reach_ns: None,
             epoch: 0,
             fingerprint: None,
-            sent_through: None,
+            values_through: None,
         }
     }
 
@@ -543,17 +586,19 @@ impl PaneCursor {
                 0,
                 0,
                 0,
+                // Every row of it: the store has nothing here and never will, so the block is a
+                // discontinuity in the values the subscription delivers.
+                rows,
             );
             self.next = probe_end;
-            self.sent_through = Some(probe_end);
-            self.gap_span = self.gap_span.saturating_mul(2);
+            self.values_through = None;
+            self.gap_span = next_gap_span(self.gap_span);
             return Ok(Step::Send(block));
         }
         self.gap_span = GAP_PROBE_ROWS;
         let block_end = limit.min(self.next + self.sub.rows_per_block as i64);
         let bytes = self.block(state, self.next, block_end, watermark)?;
         self.next = block_end;
-        self.sent_through = Some(block_end);
         Ok(Step::Send(bytes))
     }
 
@@ -571,13 +616,18 @@ impl PaneCursor {
         fold: u8,
         trailer_bytes: u32,
         observed_cells: u32,
+        // Rows of this block the store held no frame for at all; `rows` for a grey block.
+        unbacked_rows: i64,
     ) -> Vec<u8> {
         let s = &self.sub;
         let mut flags = 0u8;
         if final_ {
             flags |= FLAG_FINAL;
         }
-        if self.sent_through != Some(row0) {
+        // **The mark is about values, not addresses** ([`Self::values_through`]): this block does
+        // not continue the measurements delivered so far, or it does not carry measurements for all
+        // of its own rows. Either way the client has a part to fill from tiles.
+        if self.values_through != Some(row0) || unbacked_rows > 0 {
             flags |= FLAG_DISCONTINUITY;
         }
         let nf = if kind == KIND_ROWS { s.nf as u16 } else { 0 };
@@ -589,6 +639,10 @@ impl PaneCursor {
         b.push(tier);
         b.push(fold);
         b.extend_from_slice(&nf.to_le_bytes());
+        // Bounded by construction: a rows block is at most MAX_BLOCK_ROWS and a grey block at most
+        // MAX_GAP_ROWS, both inside u32 — so `rows` is never the clamp a client would read as a
+        // hole (see MAX_GAP_ROWS).
+        debug_assert!(rows >= 0 && rows <= i64::from(u32::MAX));
         b.extend_from_slice(&u32::try_from(rows).unwrap_or(u32::MAX).to_le_bytes());
         b.extend_from_slice(&epoch.to_le_bytes());
         b.extend_from_slice(&s.row_ns(row0).to_le_bytes());
@@ -655,6 +709,13 @@ impl PaneCursor {
         let (codes, present, aligned) = overlay.selected_plane_codes(&self.sub.device);
         let trailer = trailer(&codes, present, aligned);
         let final_ = watermark.is_some_and(|w| end_ns <= w);
+        // **Rows the store held no frame for at all** — the parts a client fills from tiles, and
+        // what `DISCONTINUITY` marks (see `values_through`). A row with *some* unobserved cells is
+        // not one of them: that is the coverage plane's business (a narrower band under a wider
+        // pane is grey, not a hole in the row stream).
+        let unbacked = (0..nrows)
+            .filter(|r| o.cells[r * nf..(r + 1) * nf].iter().all(|c| c.sources == 0))
+            .count() as i64;
         let epoch = self.fold_epoch(overlay.config_fingerprint());
         let mut out = self.header(
             KIND_ROWS,
@@ -667,7 +728,14 @@ impl PaneCursor {
             fold,
             u32::try_from(trailer.len()).unwrap_or(u32::MAX),
             u32::try_from(o.observed_cells).unwrap_or(u32::MAX),
+            unbacked,
         );
+        // **What the client has values for, up to this block's end**: the question the next block's
+        // flag asks is whether the row immediately before it carries a measurement, so what matters
+        // here is this block's **last** row — a hole earlier in the block is already marked on the
+        // block that holds it, and does not make the rows after it unknown.
+        let last_backed = o.cells[(nrows - 1) * nf..].iter().any(|c| c.sources > 0);
+        self.values_through = last_backed.then_some(b);
         out.reserve(nrows * nf * 2 + trailer.len());
         for c in &o.cells {
             let v: f32 = if c.sources == 0 { f32::NAN } else { c.max_db };
@@ -882,4 +950,45 @@ pub(crate) fn serve(
         }
     }
     let _ = ws.get_mut().shutdown(Shutdown::Both);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A block's `rows` always fits the field that carries it.** The grey probe doubles while it
+    /// keeps finding grey, which is what lets a range starting at the Unix epoch reach the first
+    /// recorded row in a few dozen messages; uncapped it passes `u32::MAX`, and the header would
+    /// then state a clamped count while the cursor advanced the real one — a hole in the client's
+    /// rows with nothing marking it. So the doubling is capped, and both bounds fit the field.
+    #[test]
+    fn a_block_can_never_state_more_rows_than_its_field_holds() {
+        assert!(
+            MAX_GAP_ROWS <= i64::from(u32::MAX),
+            "grey blocks fit `rows`"
+        );
+        assert!(
+            MAX_BLOCK_ROWS as i64 <= i64::from(u32::MAX),
+            "rows blocks fit `rows`"
+        );
+        let mut span = GAP_PROBE_ROWS;
+        let mut reached = false;
+        // Far more doublings than a range from the epoch can provoke (2^62 rows at one row per
+        // nanosecond), so the sequence is exercised past every plausible walk.
+        for step in 0..64 {
+            let next = next_gap_span(span);
+            assert!(next >= span, "the probe never shrinks (step {step})");
+            assert!(
+                next <= MAX_GAP_ROWS && next <= i64::from(u32::MAX),
+                "step {step}: {next} rows would not fit the field"
+            );
+            if next == span {
+                assert_eq!(next, MAX_GAP_ROWS, "it settles at the cap, nowhere else");
+                reached = true;
+            }
+            span = next;
+        }
+        assert!(reached, "the doubling must actually reach the cap");
+        assert_eq!(span, MAX_GAP_ROWS);
+    }
 }

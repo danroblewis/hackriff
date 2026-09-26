@@ -605,7 +605,7 @@ function planeBytes(
 }
 
 /** One IEEE 754 binary16, as the sixteen bits the wire sent. NaN and infinities stay non-finite. */
-function f16ToF32(bits: number): number {
+export function f16ToF32(bits: number): number {
   const sign = bits & 0x8000 ? -1 : 1, exp = (bits >> 10) & 0x1f, mant = bits & 0x3ff;
   if (exp === 0) return sign * mant * 2 ** -24;          // zero and subnormals
   if (exp === 31) return mant ? NaN : sign * Infinity;   // absent, or out of range

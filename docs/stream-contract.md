@@ -1152,14 +1152,14 @@ on a failed upgrade.
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | `kind`: 1 = **rows** (measurements follow), 2 = **unobserved** (a stretch the coverage map calls uniformly unobserved: no payload, no trailer) |
-| 1 | u8 | `flags`: bit 0 `FINAL` (the watermark has passed this block's end, so no late frame can still land in it), bit 1 `DISCONTINUITY` (this block does not continue the previous one sent on this subscription) |
+| 1 | u8 | `flags`: bit 0 `FINAL` (the watermark has passed this block's end, so no late frame can still land in it), bit 1 `DISCONTINUITY` (§17.3) |
 | 2 | u8 | `values`: 1 = little-endian IEEE **binary16**; `0` when there is no payload |
 | 3 | u8 | `level`: the store level that answered; `255` = none (an `unobserved` block) |
 | 4 | u8 | `tier`: the honesty tier of **this block** — 0 `live-iq`, 1 `spectrum-history`, 2 `survey-overview`; `255` = none |
 | 5 | u8 | `fold`: bits 0–1 the **frequency** axis, bits 2–3 the **time** axis — 0 `exact`, 1 `folded`, 2 `replicated` (the same three words `/api/tiles` states in `resolution.fold`) |
 | 6 | u16 | `nf`: the pane's columns; `0` when there is no payload |
-| 8 | u32 | `rows` in this block (for `unobserved`, the rows the stretch spans — it may be many thousands) |
-| 12 | u32 | `epoch`: the tuning configurations over the pane's window (§17.3) |
+| 8 | u32 | `rows` in this block — always the rows the cursor advanced, never a clamp: a rows block is at most 64 and an `unobserved` one at most 2³⁰ (`hk_api::spectrum_rows::MAX_GAP_ROWS`), both inside the field, so `row0 + rows` is exactly the next row to expect |
+| 12 | u32 | `epoch`: the tuning configurations over the pane's window (§17.4) |
 | 16 | i64 | `t0_ns`: the start of `row0`, Unix ns — **exact**, a fixed-width `i64`, never a JSON number |
 | 24 | i64 | `t_cell_ns`: the row period |
 | 32 | i64 | `row0`: the row's address on the time axis from the Unix epoch (`t0_ns / t_cell_ns`) |
@@ -1193,14 +1193,32 @@ cell if and only if its state is `unobserved`** — `excluded` is sampled spectr
 No state carries a measurement of any kind, so there is nothing on this wire a client can read as a
 level of zero.
 
-### 17.3 The epoch
+### 17.3 `DISCONTINUITY`: the parts the store did not have
+
+**The flag marks every part of the range the row stream did not carry as a measurement**, which is
+exactly the part a client fills from [`GET /api/tiles`](api.md) — the authority for a row this stream
+has no value for. A block carries it when either:
+
+- the rows **before** it were not delivered as measurements on this subscription — the first block of
+  a range, or the far side of a gap; or
+- the block **itself** holds rows the store had no frame for: an `unobserved` stretch (always), or a
+  tuned band with nothing recorded over some of its rows (those rows' cells are all NaN).
+
+It is deliberately **not** "the row addresses skipped": the cursor always walks forward contiguously,
+so a flag computed that way could only ever fire on a subscription's first block. A client must not
+stitch across a marked part, and on a reconnect (`t_from` = the last row in hand) it is how the server
+tells it which rows of the gap it will never get values for.
+
+### 17.4 The epoch
 
 A `u32` that **increments when the set of tuning configurations over this pane's frequency window
 changes** — a retune under the pane. It does *not* change when a dwell goes on covering the same band
 (the observation log files that as record after record with one configuration), which is why it is a
 fold of the *configurations* and not of the spans. A client re-lays its coverage fog and re-reads
 what is under the pane when the epoch it sees changes; it is a **change** signal, never a value to
-interpret, and it wraps.
+interpret, and it wraps. It counts *changes seen by this subscription*, not retunes: a block that
+straddles a retune sees both configurations at once and the next sees only the new one, so one retune
+can advance it twice. Read it as "different from the last one", never as a retune count.
 
 ## Sources
 

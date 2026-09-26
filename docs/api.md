@@ -1518,14 +1518,24 @@ text `end`.
 - **Grey rides with the rows**, as the block's own coverage trailer over the block's own axes, in the
   same four states and with the same rule the tile route's plane has (§17.2): grey if and only if
   `unobserved`; `excluded` is drawn.
-- **`epoch`** (§17.3) increments when the tuning configurations over this pane's window change — a
+- **`DISCONTINUITY` marks every part the store did not have** (§17.3) — a grey stretch, rows a tuned
+  band has no frame for, and the far side of either — and that is exactly the part a client fills from
+  `/api/tiles`. It is not "the row addresses skipped": the cursor walks forward contiguously, so a
+  flag computed that way would fire on nothing but a subscription's first block. A marked part is
+  never stitched across, and on a reconnect (`t_from` = the last row in hand) it is how the server
+  says which rows of the gap carry no values.
+- **`epoch`** (§17.4) increments when the tuning configurations over this pane's window change — a
   retune under the pane — and not when a dwell simply goes on. It is the "the fog moved" signal a
   client re-lays its coverage and re-reads its tiles on, and it is a *change*, never a value to
-  interpret.
+  interpret: a block straddling a retune sees both configurations and the next sees only the new one,
+  so one retune can advance it twice.
 - **Block size.** At most 64 rows, and at most 65 536 cells (`nf × rows`), which is the coverage
   rasteriser's own grid bound — so a block's plane is **always** laid cell-for-cell on the block's axes
-  and never read through another grid's addressing. At the live edge blocks go out as the rows are
-  recorded, in the few rows the tune record has reached, never a burst after a stall.
+  and never read through another grid's addressing. An `unobserved` block spans as many rows as the
+  coverage map says are grey, capped so its `rows` always fits the field (2³⁰ rows, ~1.4 years at a
+  40 ms row): `row0 + rows` is therefore always exactly the next row to expect. At the live edge
+  blocks go out as the rows are recorded, in the few rows the tune record has reached, never a burst
+  after a stall.
 - **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never
   holds the history mutex longer than one tile chunk; it holds no `/api/tiles` in-flight slot. At most
   **16** pane subscriptions are open per server (one per pane, where the tile route's client held up to
