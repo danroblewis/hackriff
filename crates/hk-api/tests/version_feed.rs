@@ -1,4 +1,7 @@
-//! T-1065: `GET /ws/changes` — the versioned change feed, so a client stops polling.
+//! T-1065: `GET /ws/changes` — the **route-version** feed, so a client stops polling.
+//!
+//! Not T-1040's `/ws/tiles/changes` (`hk_api::changes`), which pushes `coverage_changed` about the
+//! tile lattice. This is about HTTP routes: one version per route, advanced by a write.
 //!
 //! What these pin, in the ticket's own words (USER, 2026-09-26: *"We don't need hundreds of requests
 //! every time I slightly zoom in"*):
@@ -12,7 +15,7 @@
 //!   of the same volume. An idle socket is kept open by a WebSocket **ping**, not by JSON traffic;
 //! - and the feed is **capped and authenticated** like every other `/ws/` route.
 //!
-//! The bumps here are made through [`hk_api::ChangeFeed::bump`], the producer-side API, on a server
+//! The bumps here are made through [`hk_api::VersionFeed::bump`], the producer-side API, on a server
 //! with no audit log and so no writable control plane: what is under test is the feed itself. The
 //! HTTP **write** path that calls it — a real `POST` bumping a real route — is pinned end to end in
 //! `hk-cli/tests/api_contract.rs`, against a server driving the mock SDR.
@@ -24,7 +27,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hk_api::{ApiState, Change, ChangeFeed, Server, ServerConfig, Token};
+use hk_api::{ApiState, Server, ServerConfig, Token, VersionFeed, Versioned};
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
@@ -33,18 +36,18 @@ const TOKEN: &str = "t1065-changes-feed-token-0123456789ab";
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 
-/// A server whose only interesting state is its change feed.
-fn serve() -> (Server, Arc<ChangeFeed>) {
-    let changes: Arc<ChangeFeed> = Arc::default();
+/// A server whose only interesting state is its route-version feed.
+fn serve() -> (Server, Arc<VersionFeed>) {
+    let versions: Arc<VersionFeed> = Arc::default();
     let state = ApiState {
-        changes: Arc::clone(&changes),
+        versions: Arc::clone(&versions),
         ..ApiState::default()
     };
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         Token::from_config(TOKEN).unwrap(),
     );
-    (Server::start(config, state).unwrap(), changes)
+    (Server::start(config, state).unwrap(), versions)
 }
 
 fn connect(addr: SocketAddr) -> Ws {
@@ -98,14 +101,14 @@ fn drain(ws: &mut Ws, limit: Duration, want: usize) -> Vec<Value> {
 #[test]
 fn the_snapshot_carries_every_route_the_feed_covers() {
     let (server, feed) = serve();
-    feed.bump(Change::Coverage);
-    feed.bump(Change::Coverage);
+    feed.bump(Versioned::Coverage);
+    feed.bump(Versioned::Coverage);
     let (mut ws, snap) = subscribed(server.local_addr());
-    for c in Change::ALL {
+    for c in Versioned::ALL {
         assert!(
-            snap["routes"][c.route()].is_u64(),
+            snap["routes"][c.path()].is_u64(),
             "{} is missing from the snapshot: {snap}",
-            c.route()
+            c.path()
         );
     }
     // The snapshot is the versions AS OF the connect, so a client can file the bodies it already
@@ -121,7 +124,7 @@ fn the_snapshot_carries_every_route_the_feed_covers() {
 fn one_write_is_one_changed_for_that_route_and_no_other() {
     let (server, feed) = serve();
     let (mut ws, _) = subscribed(server.local_addr());
-    feed.bump(Change::Inventory);
+    feed.bump(Versioned::Inventory);
     let msgs = drain(&mut ws, Duration::from_secs(5), 1);
     assert_eq!(msgs.len(), 1, "one write, one message: {msgs:?}");
     assert_eq!(
@@ -149,10 +152,10 @@ fn every_route_the_feed_carries_can_be_written_and_is_reported_once() {
     let (mut ws, _) = subscribed(server.local_addr());
     // One write per route, all before the first tick can sample: each route is reported exactly
     // once, and the twelve messages name the twelve routes — no route is missing a producer path.
-    for c in Change::ALL {
+    for c in Versioned::ALL {
         feed.bump(c);
     }
-    let msgs = drain(&mut ws, Duration::from_secs(10), Change::ALL.len());
+    let msgs = drain(&mut ws, Duration::from_secs(10), Versioned::ALL.len());
     let mut seen: Vec<&str> = msgs
         .iter()
         .map(|m| {
@@ -162,7 +165,7 @@ fn every_route_the_feed_carries_can_be_written_and_is_reported_once() {
         })
         .collect();
     seen.sort_unstable();
-    let mut want: Vec<&str> = Change::ALL.iter().map(|c| c.route()).collect();
+    let mut want: Vec<&str> = Versioned::ALL.iter().map(|c| c.path()).collect();
     want.sort_unstable();
     assert_eq!(seen, want, "{msgs:?}");
     let _ = ws.close(None);
@@ -174,9 +177,9 @@ fn a_burst_of_writes_coalesces_into_one_message_at_the_newest_version() {
     let (server, feed) = serve();
     let (mut ws, _) = subscribed(server.local_addr());
     for _ in 0..20 {
-        feed.bump(Change::Annotations);
+        feed.bump(Versioned::Annotations);
     }
-    assert_eq!(feed.version(Change::Annotations), 20);
+    assert_eq!(feed.version(Versioned::Annotations), 20);
     // Twenty atomic increments complete far inside one 250 ms sampling tick, so this is normally
     // exactly one message. The bound is 2 rather than 1 only because this thread can be preempted
     // mid-burst on a loaded box — which would split the burst across two samples and is still
@@ -224,9 +227,9 @@ fn nothing_is_written_for_thirty_seconds_and_nothing_is_sent() {
     // Silent, and alive: the keep-alive is a ping (PING_EVERY = 20 s), so 30 s of idleness shows at
     // least one and the socket is still writable afterwards.
     assert!(pings >= 1, "an idle feed pings to stay open, {pings} seen");
-    assert_eq!(feed.version(Change::ControlState), 0);
+    assert_eq!(feed.version(Versioned::ControlState), 0);
     // Still connected: one write now is still reported.
-    feed.bump(Change::ControlState);
+    feed.bump(Versioned::ControlState);
     let msgs = drain(&mut ws, Duration::from_secs(5), 1);
     assert_eq!(msgs.len(), 1, "{msgs:?}");
     assert_eq!(msgs[0]["route"], json!("/api/control/state"), "{msgs:?}");
@@ -238,7 +241,7 @@ fn nothing_is_written_for_thirty_seconds_and_nothing_is_sent() {
 fn the_feed_is_capped_per_server_and_the_refusal_completes_the_upgrade() {
     let (server, _feed) = serve();
     let addr = server.local_addr();
-    let mut open: Vec<Ws> = (0..hk_api::changes::MAX_CHANGE_FEEDS)
+    let mut open: Vec<Ws> = (0..hk_api::versions::MAX_VERSION_FEEDS)
         .map(|_| subscribed(addr).0)
         .collect();
     let mut over = connect(addr);

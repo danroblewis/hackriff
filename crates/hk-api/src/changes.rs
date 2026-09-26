@@ -1,545 +1,365 @@
-//! `GET /ws/changes` — the **versioned change feed** (T-1065): the server says *what changed*, so a
-//! client stops asking.
+//! `GET /ws/tiles/changes` — **`coverage_changed` pushed on a retune** (T-1040), so a client
+//! re-lays the coverage fog at once and re-asks exactly the tiles that moved, instead of waiting
+//! for its survey timer and its refresh lane to come round.
 //!
-//! # Why
+//! # What changes, and why a retune is the event
 //!
-//! Measured in real Chrome on 2026-09-26: a thin client following the live edge with one pane and
-//! nothing moving issued **7.3 requests a second** besides its WebSockets — `/api/outputs` and
-//! `/api/pipelines` every second; `/api/control/state` (10 kB), `/api/annotations`, `/api/paths`,
-//! `/api/tune-history`, `/api/frontend/events` and the survey coverage every two; `/api/inventory`
-//! twice, `/api/timeline` and `/api/recordings` every five. A 24-event trackpad zoom produced 264
-//! requests. Freezing the view saved nothing (6.7 req/s), because **none of those answers changes
-//! between polls in the common case**: they were re-reads of an unchanged body, one new TCP
-//! connection each, and the staging tunnel logged 8 622 `Unable to reach the origin service: EOF`
-//! in fifteen minutes under them.
+//! A tile's coverage is a function of the tune record ([`crate::coverage`]): which band each front
+//! end was on, when. Between retunes nothing about that function changes except that it reaches
+//! further forward — which the live edge already carries (rows, `as_of_s`). What *does* change it is
+//! a **move**: from the instant a front end leaves a band, that band's newest rows are `unobserved`
+//! (the departed band's fog), and the band it arrives at turns observed. Both halves are the same
+//! fact — one front end, one instant, two bands — so one event carries them:
+//! `{f_lo, f_hi, t}` is the union of the departed and arrived bands and the instant of the move,
+//! and every tile that intersects `[f_lo, f_hi] × [t, ∞)` is exactly the set a client holds a now
+//! out-of-date copy of.
 //!
-//! A poll is a client asking "did it change?" of a server that already knows. This route answers
-//! that question once, in the direction the knowledge flows.
+//! # It reads the records that already exist
 //!
-//! # The contract
+//! Nothing new is recorded. The band each front end is on **now** is read from the same two tune
+//! records the coverage map rasterises: the IQ ring's journal (a segment opens on every provenance
+//! change) and, for a front end the ring holds nothing for — the ring refused, T-588/T-596 — the
+//! observation log's dwell in flight. One source per front end, never a mix: the ring's segment is
+//! the tuned window, a dwell's is the analysed one, and alternating between the two would report a
+//! move that never happened. A provenance change that keeps the band (a gain step, a reseal) is not
+//! a move and sends nothing. A front end that stops reporting sends nothing either: its fog just
+//! stops advancing, which the rows already say.
 //!
-//! Each route in [`Change::ALL`] has a **version**: a counter, per server process, that the server
-//! increments when the state behind that route is written. On connect the socket sends the whole
-//! table once; after that it sends one
-//!
-//! ```json
-//! {"type": "changed", "route": "/api/control/state", "version": 7, "t_s": 1790000000.123}
-//! ```
-//!
-//! per route whose version moved, and **nothing at all while nothing changes**. The route key *is*
-//! the path the client fetches, so nothing has to be mapped: `changed` on `/api/inventory` means
-//! re-read `/api/inventory` (with whatever window the client is showing) and file the answer under
-//! `version`.
-//!
-//! **Coalesced by construction.** The feed is not a queue of events; it is a *table of versions*
-//! that a connection samples every [`TICK`] (250 ms). Twenty writes inside one tick advance the
-//! counter twenty times and produce **one** message carrying the newest version — so a burst can
-//! never amplify into a burst of messages, and the per-route ceiling is four messages a second
-//! however hard the state is being written. Nothing is queued per connection and nothing is
-//! buffered, so a slow reader cannot make the server hold history for it: it simply learns the
-//! latest version a little later.
-//!
-//! **A version is an opaque monotonic number**, not a count of writes anyone should read meaning
-//! into, and it is **per process**: a restart resets it (and the client reconnects and takes the
-//! new snapshot, so it re-reads once). `0` means "not written since this server started".
-//!
-//! # What this feed does NOT report, and why the client keeps a slow poll
-//!
-//! A version moves when a **request writes** the state behind it ([`routes_for_write`], applied at
-//! the one control-plane choke point every mutating route already passes through). It does **not**
-//! move for state that grows because the radio is running:
-//!
-//! - new detections arriving in the inventory,
-//! - the coverage map widening as the front end is swept by an already-started sweep,
-//! - the capture window advancing, or a front-end event being judged,
-//! - a re-plumb changing `run.segment` on `/api/control/state`.
-//!
-//! Those are producer-side events. [`ChangeFeed::bump`] is public precisely so a producer can
-//! report them — it is the API the pipeline's ingest and T-1040's `coverage_changed` build on — but
-//! **nothing calls it from the capture path today**, and a route with no producer wired is a route a
-//! client must still poll (slowly) to see grow. Saying so here is the point: a feed that implied it
-//! covered the live edge would be the "we have it but didn't render it" bug with the arrow
-//! reversed. `/ws/tiles/rows` (T-468) already pushes the waterfall's own rows, and is not duplicated
-//! here.
-//!
-//! # Cost
-//!
-//! A bump is one relaxed `fetch_add` on an atomic in an array — no lock, no allocation, no I/O — so
-//! it is payable on any thread, including one that gates the ring. A connection costs one thread
-//! blocked in `read` with a 250 ms timeout (the same shape as `/ws/tiles/rows`), which is why the
-//! count is capped at [`MAX_CHANGE_FEEDS`] per server. An idle feed sends **no messages**; it sends
-//! an unsolicited **ping** every [`PING_EVERY`] so an idle socket survives a proxy without any JSON
-//! traffic at all.
+//! This route is the durable half of the user's 2026-09-25 "change events instead of re-asking"
+//! (ticket C); its live-edge `tile_committed` half is superseded by the live-stream ring (LSR-1/2).
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+use std::net::{Shutdown, TcpStream};
+use std::time::Duration;
 
-use hk_model::Timestamp;
-use serde_json::{Map, Value, json};
+use hk_model::FreqRange;
+use hk_model::attention::observation::ObservationRecord;
+use serde_json::{Value, json};
 
 use crate::http::ApiState;
-use crate::query::ApiError;
-use crate::websock::{drop_socket, peer_alive, ping, refuse, send, upgrade};
+use crate::query::{ApiError, Params};
+use crate::rows::{FeedSlot, accept, peer_alive, refuse, send};
 
-/// How often a connection samples the version table. The **per-route ceiling on messages** is one
-/// per tick: 4 a second, whatever the write rate.
-pub const TICK: Duration = Duration::from_millis(250);
+/// Change subscriptions open at once, per server. Past it the handshake is refused `503`.
+pub const MAX_CHANGE_FEEDS: usize = 16;
 
-/// How often an **idle** feed pings, so a proxy does not reap a socket that is deliberately silent.
-pub const PING_EVERY: Duration = Duration::from_secs(20);
+/// How often a subscription reads the tune record. One read is the ring's newest segments and the
+/// dwells in flight — both in memory — so this is a cost measured in microseconds, and it bounds
+/// how late a `coverage_changed` can be after the record states the move.
+pub const CHANGE_TICK: Duration = Duration::from_millis(100);
 
-/// Concurrent `/ws/changes` subscriptions per server (one thread each). A client needs exactly one;
-/// this is headroom for a reload racing its predecessor's teardown, plus `hk` and a second page.
-pub const MAX_CHANGE_FEEDS: usize = 8;
+/// Newest ring segments read per tick. Several front ends each open a segment per provenance
+/// change, so a handful of the newest is enough to hold every front end's current one.
+const RING_NEWEST: usize = 64;
 
-/// One route with a version. The variant's [`Change::route`] is the **path a client fetches**, so
-/// the feed needs no mapping table on the client side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Change {
-    /// `/api/control/state` — the 10 kB body the review found being re-read every 2 s.
-    ControlState,
-    /// `/api/navigation` — the achievable (centre, span) grid, which a device write re-derives.
-    Navigation,
-    /// `/api/coverage` — observed-versus-unobserved, derived from the tune history.
-    Coverage,
-    /// `/api/tune-history` — the recorded tune intervals.
-    TuneHistory,
-    /// `/api/timeline` — the capture window (retention, `t0..t1`).
-    Timeline,
-    /// `/api/recordings` — the persisted IQ recordings.
-    Recordings,
-    /// `/api/inventory` — the window-scoped Candidate/Confirmed lists.
-    Inventory,
-    /// `/api/annotations` — the user's own marks.
-    Annotations,
-    /// `/api/paths` — traced `(t, f)` paths.
-    Paths,
-    /// `/api/outputs` — output recordings.
-    Outputs,
-    /// `/api/pipelines` — running pipelines (and the recipes they run).
-    Pipelines,
-    /// `/api/frontend/events` — clipped whole-span steps.
-    Frontend,
+/// Two band edges closer than this are the same band, Hz.
+const SAME_BAND_HZ: f64 = 1.0;
+
+/// Query parameters this route accepts.
+const ALLOWED: [&str; 1] = ["token"];
+
+/// The band one front end is on now, per the tune record.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tuned {
+    /// The front end (`device_id`, or `"unknown"` for a record that did not name one).
+    pub device: String,
+    /// Low edge of the band, Hz.
+    pub f_lo_hz: f64,
+    /// High edge of the band, Hz.
+    pub f_hi_hz: f64,
+    /// When the front end arrived on this band (the record's start), Unix ns.
+    pub since_ns: i64,
+    /// How far forward the record of it reaches, Unix ns.
+    pub reach_ns: i64,
+    /// Which record said so: `"iq-ring"` or `"open-dwell"`.
+    pub source: &'static str,
 }
 
-impl Change {
-    /// Every route the feed carries, in wire order. The array's index is the variant's slot in
-    /// [`ChangeFeed`]'s table, which is why it is written out rather than derived.
-    pub const ALL: [Change; 12] = [
-        Change::ControlState,
-        Change::Navigation,
-        Change::Coverage,
-        Change::TuneHistory,
-        Change::Timeline,
-        Change::Recordings,
-        Change::Inventory,
-        Change::Annotations,
-        Change::Paths,
-        Change::Outputs,
-        Change::Pipelines,
-        Change::Frontend,
-    ];
-
-    /// The route this version belongs to — the path a client `GET`s.
-    pub const fn route(self) -> &'static str {
-        match self {
-            Change::ControlState => "/api/control/state",
-            Change::Navigation => "/api/navigation",
-            Change::Coverage => "/api/coverage",
-            Change::TuneHistory => "/api/tune-history",
-            Change::Timeline => "/api/timeline",
-            Change::Recordings => "/api/recordings",
-            Change::Inventory => "/api/inventory",
-            Change::Annotations => "/api/annotations",
-            Change::Paths => "/api/paths",
-            Change::Outputs => "/api/outputs",
-            Change::Pipelines => "/api/pipelines",
-            Change::Frontend => "/api/frontend/events",
-        }
+impl Tuned {
+    fn same_band(&self, o: &Tuned) -> bool {
+        (self.f_lo_hz - o.f_lo_hz).abs() < SAME_BAND_HZ
+            && (self.f_hi_hz - o.f_hi_hz).abs() < SAME_BAND_HZ
     }
 
-    /// The variant for a route key, or `None` for a route the feed does not carry.
-    pub fn from_route(route: &str) -> Option<Self> {
-        Change::ALL.into_iter().find(|c| c.route() == route)
+    fn band_json(&self) -> Value {
+        json!({ "f_lo": self.f_lo_hz, "f_hi": self.f_hi_hz })
     }
 
-    fn slot(self) -> usize {
-        // `position` over ALL, not `self as usize`: the table's order is the declared one above,
-        // so adding a variant in the middle cannot silently renumber a live server's versions.
-        Change::ALL
-            .iter()
-            .position(|c| *c == self)
-            .expect("every variant is in Change::ALL")
-    }
-}
-
-/// The routes a **successful mutating request** to `path` changes the state behind.
-///
-/// This is the whole write side of the feed, as one pure function, applied once — in
-/// [`crate::control::dispatch_device`], the choke point every mutating control-plane route already
-/// passes through. It is deliberately **generous where a write may or may not have moved a derived
-/// route**: a spurious re-read costs one request, a missed change leaves a client showing something
-/// that is no longer true, and those are not the same mistake. So every device write bumps the
-/// tuning's derived routes (the achievable grid, the tune history, the coverage that is computed
-/// from it) whether or not this particular field reached them.
-///
-/// A path that maps to nothing bumps nothing: the feed carries [`Change::ALL`] and says so, and a
-/// client polls what the feed does not carry. `changes_cover_every_listed_route` pins the mapping
-/// against [`crate::http::ROUTES`] so a route cannot join the list without an answer here.
-pub fn routes_for_write(path: &str) -> &'static [Change] {
-    use Change::*;
-    /// Moving the radio re-derives the tuning, the achievable grid, the recorded tune intervals and
-    /// the coverage computed from them.
-    const DEVICE: &[Change] = &[ControlState, Navigation, TuneHistory, Coverage];
-    match path {
-        "/api/control/center"
-        | "/api/control/rate"
-        | "/api/control/window"
-        | "/api/control/gains"
-        | "/api/control/bias_tee"
-        | "/api/control/baseband_filter"
-        | "/api/control/scan"
-        | "/api/control/scan/stop" => DEVICE,
-        // Display state changes what is shown, never what is captured (T-347's rule, on the wire).
-        "/api/control/display" => &[ControlState],
-        // Manual recording is `run.recording` on the state *and* a recording to list; its window is
-        // the retained capture the timeline draws.
-        "/api/control/record/start" | "/api/control/record/stop" => {
-            &[ControlState, Recordings, Timeline]
-        }
-        "/api/outputs/record/start" | "/api/outputs/record/stop" => &[Outputs],
-        // T-157: a clip of the ring becomes a persisted recording, which extends the audio horizon.
-        "/api/iqbuffer/clip" => &[Recordings, Timeline],
-        _ => prefixed(path),
-    }
-}
-
-/// The prefix half of [`routes_for_write`]: the collection routes, whose ids are in the path.
-fn prefixed(path: &str) -> &'static [Change] {
-    use Change::*;
-    let under = |p: &str| path == p || path.starts_with(&format!("{p}/"));
-    if under("/api/annotations") {
-        &[Annotations]
-    } else if under("/api/paths") {
-        &[Paths]
-    } else if under("/api/pipelines") || under("/api/recipes") {
-        &[Pipelines]
-    } else if under("/api/inventory") || under("/api/clusters") {
-        // A promote, a merge, a band edit — and a cluster promoted to an emitter — all change what
-        // the window-scoped lists answer.
-        &[Inventory]
-    } else if under("/api/recordings") {
-        &[Recordings]
-    // Neither `/api/paths` nor `/api/recordings` has a mutating route today (a path is traced by
-    // the pipeline, a recording is made by `/api/control/record/*` or `/api/iqbuffer/clip`). The
-    // arms are declared anyway, and tested, so a mutating route added under either prefix later
-    // cannot silently skip the feed and leave a client showing what it read before.
-    } else {
-        &[]
-    }
-}
-
-/// The version table: one counter per [`Change`], shared by cloning the [`std::sync::Arc`] on
-/// [`ApiState`].
-///
-/// A bump is a relaxed `fetch_add`; a read is a relaxed load. There is no subscriber list and no
-/// per-connection queue — a connection *samples* this table (see the module docs), which is what
-/// makes coalescing a property of the design rather than a timer someone has to get right.
-#[derive(Debug, Default)]
-pub struct ChangeFeed {
-    versions: [AtomicU64; Change::ALL.len()],
-    /// Open `/ws/changes` connections, against [`MAX_CHANGE_FEEDS`].
-    feeds: AtomicUsize,
-}
-
-impl ChangeFeed {
-    /// This route's current version. `0` until its first write.
-    pub fn version(&self, c: Change) -> u64 {
-        self.versions[c.slot()].load(Ordering::Relaxed)
-    }
-
-    /// Records that the state behind `c` was written; returns the new version.
-    ///
-    /// Cheap enough for any thread, including the capture thread: one atomic add, no allocation.
-    pub fn bump(&self, c: Change) -> u64 {
-        self.versions[c.slot()].fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// [`Self::bump`] for each of `cs` (the shape [`routes_for_write`] answers in).
-    pub fn bump_all(&self, cs: &[Change]) {
-        for c in cs {
-            self.bump(*c);
-        }
-    }
-
-    /// Every route's version, keyed by route.
-    pub fn versions_json(&self) -> Value {
-        let mut m = Map::new();
-        for c in Change::ALL {
-            m.insert(c.route().to_owned(), json!(self.version(c)));
-        }
-        Value::Object(m)
-    }
-
-    fn all(&self) -> [u64; Change::ALL.len()] {
-        Change::ALL.map(|c| self.version(c))
-    }
-}
-
-/// Counts open feeds against [`MAX_CHANGE_FEEDS`]; released on drop.
-struct FeedSlot<'a>(&'a AtomicUsize);
-
-impl<'a> FeedSlot<'a> {
-    fn take(n: &'a AtomicUsize) -> Option<Self> {
-        n.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-            (v < MAX_CHANGE_FEEDS).then_some(v + 1)
+    fn json(&self) -> Value {
+        json!({
+            "device": self.device,
+            "f_lo": self.f_lo_hz,
+            "f_hi": self.f_hi_hz,
+            "since_s": self.since_ns as f64 / 1e9,
+            "as_of_s": self.reach_ns as f64 / 1e9,
+            "source": self.source,
         })
-        .ok()
-        .map(|_| Self(n))
     }
 }
 
-impl Drop for FeedSlot<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+/// **The band every front end is on now** — the newest record per front end, one source each.
+pub fn tuned_now(state: &ApiState) -> BTreeMap<String, Tuned> {
+    let mut out: BTreeMap<String, Tuned> = BTreeMap::new();
+    if let Some(ring) = state.iq_buffer.as_deref() {
+        let status = ring.status(&crate::iqbuffer::IqBufferQuery {
+            t0: None,
+            t1: None,
+            limit: RING_NEWEST,
+        });
+        for s in status
+            .get("segments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let (Some(c), Some(r), Some(t0), Some(t1)) = (
+                s.get("center_hz").and_then(Value::as_f64),
+                s.get("sample_rate_hz")
+                    .and_then(Value::as_f64)
+                    .filter(|r| *r > 0.0),
+                s.get("t0_ns").and_then(Value::as_i64),
+                s.get("t1_ns").and_then(Value::as_i64),
+            ) else {
+                continue;
+            };
+            if t1 <= t0 {
+                continue;
+            }
+            let device = s
+                .get("device_id")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+                .unwrap_or("unknown")
+                .to_owned();
+            let t = Tuned {
+                device: device.clone(),
+                f_lo_hz: c - r / 2.0,
+                f_hi_hz: c + r / 2.0,
+                since_ns: t0,
+                reach_ns: t1,
+                source: "iq-ring",
+            };
+            match out.get(&device) {
+                Some(have) if have.since_ns >= t.since_ns => {}
+                _ => {
+                    out.insert(device, t);
+                }
+            }
+        }
+    }
+    // A front end the ring holds nothing for: its dwell in flight (T-596).
+    if let Some(log) = state.observations.as_ref() {
+        let mut dwells: BTreeMap<String, Tuned> = BTreeMap::new();
+        for rec in log.open_dwells() {
+            if !matches!(rec, ObservationRecord::Dwell(_)) {
+                continue;
+            }
+            let read = hk_store::spans_from_records(
+                std::slice::from_ref(&rec),
+                &[],
+                FreqRange::new(f64::NEG_INFINITY, f64::INFINITY),
+            );
+            // A notched dwell is three spans (T-595); the band is their hull.
+            let mut band: Option<Tuned> = None;
+            for sp in &read.spans {
+                if sp.time.end <= sp.time.start {
+                    continue;
+                }
+                let device = sp.device.as_str().to_owned();
+                let b = band.get_or_insert_with(|| Tuned {
+                    device,
+                    f_lo_hz: sp.freq.lo_hz,
+                    f_hi_hz: sp.freq.hi_hz,
+                    since_ns: sp.time.start.as_unix_nanos(),
+                    reach_ns: sp.time.end.as_unix_nanos(),
+                    source: "open-dwell",
+                });
+                b.f_lo_hz = b.f_lo_hz.min(sp.freq.lo_hz);
+                b.f_hi_hz = b.f_hi_hz.max(sp.freq.hi_hz);
+                b.since_ns = b.since_ns.min(sp.time.start.as_unix_nanos());
+                b.reach_ns = b.reach_ns.max(sp.time.end.as_unix_nanos());
+            }
+            let Some(b) = band else { continue };
+            match dwells.get(&b.device) {
+                Some(have) if have.since_ns >= b.since_ns => {}
+                _ => {
+                    dwells.insert(b.device.clone(), b);
+                }
+            }
+        }
+        for (d, t) in dwells {
+            out.entry(d).or_insert(t);
+        }
+    }
+    out
+}
+
+/// Follows the tune record for one subscription and states each move once.
+#[derive(Debug, Default)]
+pub struct ChangeWatch {
+    last: BTreeMap<String, Tuned>,
+    seq: u64,
+}
+
+impl ChangeWatch {
+    /// A watch that starts from `now` — what the `subscribed` message states — so nothing already
+    /// in it is reported as a change.
+    pub fn new(now: BTreeMap<String, Tuned>) -> Self {
+        Self { last: now, seq: 0 }
+    }
+
+    /// The bands as last seen.
+    pub fn tuned(&self) -> impl Iterator<Item = &Tuned> {
+        self.last.values()
+    }
+
+    /// Folds in a fresh reading and returns one `coverage_changed` per front end that **moved**
+    /// (its band changed, or it appeared). A front end that kept its band, or is gone from the
+    /// reading, produces nothing.
+    pub fn step(&mut self, now: BTreeMap<String, Tuned>) -> Vec<Value> {
+        let mut out = Vec::new();
+        for (device, t) in now {
+            let prev = self.last.get(&device);
+            let moved = match prev {
+                None => true,
+                // A reading older than the one in hand is a lagging source, not a move back.
+                Some(p) => t.since_ns >= p.since_ns && !t.same_band(p),
+            };
+            if moved {
+                self.seq += 1;
+                let (f_lo, f_hi) = prev.map_or((t.f_lo_hz, t.f_hi_hz), |p| {
+                    (p.f_lo_hz.min(t.f_lo_hz), p.f_hi_hz.max(t.f_hi_hz))
+                });
+                out.push(json!({
+                    "type": "coverage_changed",
+                    "seq": self.seq,
+                    "device": device,
+                    "t": t.since_ns as f64 / 1e9,
+                    "f_lo": f_lo,
+                    "f_hi": f_hi,
+                    "departed": prev.map(Tuned::band_json),
+                    "arrived": t.band_json(),
+                    "as_of_s": t.reach_ns as f64 / 1e9,
+                    "source": t.source,
+                }));
+                self.last.insert(device, t);
+            } else if prev.is_some_and(|p| t.since_ns >= p.since_ns) {
+                self.last.insert(device, t);
+            }
+        }
+        out
     }
 }
 
-fn now_s() -> f64 {
-    Timestamp::now().as_unix_nanos() as f64 / 1e9
-}
-
-/// The first message: the whole table, so a client that has just connected (or reconnected) knows
-/// which of its cached bodies are stale without a `changed` for each of them.
-fn versions_message(feed: &ChangeFeed) -> Value {
+/// The first message: the bands every front end is on as the watch starts.
+fn subscribed_json(watch: &ChangeWatch) -> Value {
     json!({
-        "type": "versions",
-        "routes": feed.versions_json(),
-        "tick_ms": TICK.as_millis() as u64,
-        "t_s": now_s(),
+        "type": "subscribed",
+        "tuned": watch.tuned().map(Tuned::json).collect::<Vec<_>>(),
+        "tick_ms": CHANGE_TICK.as_millis() as u64,
+        "rule": "coverage_changed {f_lo, f_hi, t} is sent once per front-end MOVE: the union of the \
+                 band it left and the band it arrived at, from the instant it arrived. Every tile \
+                 intersecting [f_lo, f_hi] x [t, now] holds out-of-date coverage; nothing else did \
+                 change. A provenance change that keeps the band sends nothing.",
     })
 }
 
-fn changed_message(c: Change, version: u64) -> Value {
-    json!({
-        "type": "changed",
-        "route": c.route(),
-        "version": version,
-        "t_s": now_s(),
-    })
-}
-
-/// Serves one `/ws/changes` connection (token already verified by [`crate::http`]).
-pub(crate) fn serve(stream: std::net::TcpStream, state: &ApiState, headers: &[(String, String)]) {
-    let Some(mut ws) = upgrade(stream, headers) else {
+/// Serves one `/ws/tiles/changes` request (token already verified).
+pub(crate) fn serve(
+    stream: TcpStream,
+    state: &ApiState,
+    query: &Params,
+    headers: &[(String, String)],
+) {
+    let Some(mut ws) = accept(stream, headers) else {
         return;
     };
-    let feed = &*state.changes;
-    let Some(_slot) = FeedSlot::take(&feed.feeds) else {
+    let Some(_slot) = FeedSlot::take(&state.change_feeds, MAX_CHANGE_FEEDS) else {
         return refuse(
             ws,
             &ApiError::new(
                 503,
-                format!("{MAX_CHANGE_FEEDS} change feeds are already open on this server"),
+                format!("{MAX_CHANGE_FEEDS} change subscriptions are already open on this server"),
             ),
         );
     };
-    // Sampled BEFORE the snapshot is sent, so a write that lands between the two is reported as a
-    // `changed` rather than silently folded into a snapshot the client already had.
-    let mut seen = feed.all();
-    if !send(&mut ws, &versions_message(feed)) {
+    if let Some((k, _)) = query.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
+        return refuse(ws, &ApiError::new(400, format!("unknown parameter `{k}`")));
+    }
+    let mut watch = ChangeWatch::new(tuned_now(state));
+    if !send(&mut ws, &subscribed_json(&watch)) {
         return;
     }
-    let mut last_ping = Instant::now();
     loop {
-        if !peer_alive(&mut ws, TICK) {
+        for v in watch.step(tuned_now(state)) {
+            if !send(&mut ws, &v) {
+                return;
+            }
+        }
+        if !peer_alive(&mut ws, CHANGE_TICK) {
             break;
         }
-        let now = feed.all();
-        let mut said_something = false;
-        for (i, c) in Change::ALL.into_iter().enumerate() {
-            if now[i] != seen[i] {
-                seen[i] = now[i];
-                if !send(&mut ws, &changed_message(c, now[i])) {
-                    return;
-                }
-                said_something = true;
-            }
-        }
-        // A message is itself proof the socket is alive; only a genuinely silent feed pings.
-        if said_something {
-            last_ping = Instant::now();
-        } else if last_ping.elapsed() >= PING_EVERY {
-            if !ping(&mut ws) {
-                break;
-            }
-            last_ping = Instant::now();
-        }
     }
-    drop_socket(&mut ws);
-}
-
-/// Is this GET answered with a validator (`ETag`/`If-None-Match` → `304`)?
-///
-/// `/api/control/state` alone, for now, and for the reason the review measured: 10 kB every two
-/// seconds, byte-identical almost every time. The tag is **content-derived**, so a body that really
-/// did change (a re-plumb moved `run.segment`, a sweep advanced `scan`) still answers `200` with
-/// the new bytes — the validator can never serve a stale state, only skip an identical one.
-pub fn validated(path: &str) -> bool {
-    path == Change::ControlState.route()
+    let _ = ws.get_mut().shutdown(Shutdown::Both);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::ROUTES;
 
-    #[test]
-    fn every_route_is_a_real_get_route_and_keys_are_unique() {
-        for c in Change::ALL {
-            assert!(
-                ROUTES.iter().any(|(m, p)| *m == "GET" && *p == c.route()),
-                "{:?}: {} is not a GET route the server serves",
-                c,
-                c.route()
-            );
-            assert_eq!(Change::from_route(c.route()), Some(c));
-        }
-        let mut keys: Vec<&str> = Change::ALL.iter().map(|c| c.route()).collect();
-        keys.sort_unstable();
-        let n = keys.len();
-        keys.dedup();
-        assert_eq!(keys.len(), n, "route keys must be unique");
-        assert_eq!(Change::from_route("/api/status"), None);
-    }
-
-    #[test]
-    fn slots_are_distinct_and_within_the_table() {
-        let mut slots: Vec<usize> = Change::ALL.iter().map(|c| c.slot()).collect();
-        slots.sort_unstable();
-        assert_eq!(slots, (0..Change::ALL.len()).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn a_bump_moves_exactly_one_version() {
-        let feed = ChangeFeed::default();
-        for c in Change::ALL {
-            assert_eq!(feed.version(c), 0, "{c:?} starts unwritten");
-        }
-        assert_eq!(feed.bump(Change::Inventory), 1);
-        assert_eq!(feed.bump(Change::Inventory), 2);
-        assert_eq!(feed.version(Change::Inventory), 2);
-        for c in Change::ALL.into_iter().filter(|c| *c != Change::Inventory) {
-            assert_eq!(feed.version(c), 0, "{c:?} must not move with another route");
-        }
-        assert_eq!(feed.versions_json()["/api/inventory"], json!(2));
-    }
-
-    #[test]
-    fn a_device_write_reaches_the_tuning_and_everything_derived_from_it() {
-        for p in [
-            "/api/control/center",
-            "/api/control/rate",
-            "/api/control/window",
-            "/api/control/gains",
-            "/api/control/bias_tee",
-            "/api/control/baseband_filter",
-            "/api/control/scan",
-            "/api/control/scan/stop",
-        ] {
-            let r = routes_for_write(p);
-            for want in [
-                Change::ControlState,
-                Change::Navigation,
-                Change::TuneHistory,
-                Change::Coverage,
-            ] {
-                assert!(r.contains(&want), "{p} must bump {want:?}");
-            }
-        }
-        // A view change is not a device change: it moves the state body and nothing else.
-        assert_eq!(
-            routes_for_write("/api/control/display"),
-            &[Change::ControlState]
-        );
-    }
-
-    #[test]
-    fn collection_writes_map_by_prefix_including_their_ids() {
-        assert_eq!(routes_for_write("/api/annotations"), &[Change::Annotations]);
-        assert_eq!(
-            routes_for_write("/api/annotations/01HZZZ"),
-            &[Change::Annotations]
-        );
-        assert_eq!(routes_for_write("/api/pipelines"), &[Change::Pipelines]);
-        assert_eq!(
-            routes_for_write("/api/pipelines/p1/channels"),
-            &[Change::Pipelines]
-        );
-        assert_eq!(routes_for_write("/api/recipes/r1"), &[Change::Pipelines]);
-        assert_eq!(
-            routes_for_write("/api/inventory/01HZZZ/promote"),
-            &[Change::Inventory]
-        );
-        assert_eq!(
-            routes_for_write("/api/clusters/c1/promote"),
-            &[Change::Inventory]
-        );
-        assert_eq!(
-            routes_for_write("/api/outputs/record/start"),
-            &[Change::Outputs]
-        );
-        // Declared before their first writer exists (see `prefixed`), so one cannot be added
-        // without the feed.
-        assert_eq!(routes_for_write("/api/paths/p1"), &[Change::Paths]);
-        assert_eq!(
-            routes_for_write("/api/recordings/r1"),
-            &[Change::Recordings]
-        );
-        // A prefix is a path segment, never a string prefix: `/api/annotationsX` is not one.
-        assert!(routes_for_write("/api/annotationsX").is_empty());
-        // A route the feed does not carry bumps nothing at all — it does not fall back to "all".
-        assert!(routes_for_write("/api/ml/models/m/mode").is_empty());
-        assert!(routes_for_write("/api/playback").is_empty());
-    }
-
-    #[test]
-    fn only_control_state_is_validated_today() {
-        assert!(validated("/api/control/state"));
-        for c in Change::ALL
-            .into_iter()
-            .filter(|c| *c != Change::ControlState)
-        {
-            assert!(!validated(c.route()), "{c:?} is not validated yet");
+    fn t(device: &str, lo: f64, hi: f64, since: i64) -> Tuned {
+        Tuned {
+            device: device.into(),
+            f_lo_hz: lo,
+            f_hi_hz: hi,
+            since_ns: since,
+            reach_ns: since + 1,
+            source: "iq-ring",
         }
     }
 
+    fn map(ts: &[Tuned]) -> BTreeMap<String, Tuned> {
+        ts.iter().map(|x| (x.device.clone(), x.clone())).collect()
+    }
+
     #[test]
-    fn the_feed_route_is_in_the_table() {
+    fn a_move_is_one_event_naming_both_bands_from_the_arrival() {
+        let mut w = ChangeWatch::new(map(&[t("a", 100e6, 102e6, 0)]));
+        assert!(w.step(map(&[t("a", 100e6, 102e6, 0)])).is_empty());
+        // Same band, new segment (a gain step): not a move.
+        assert!(w.step(map(&[t("a", 100e6, 102e6, 5_000)])).is_empty());
+        let ev = w.step(map(&[t("a", 110e6, 112e6, 9_000_000_000)]));
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        let e = &ev[0];
+        assert_eq!(e["type"], "coverage_changed");
+        assert_eq!(e["seq"], 1);
+        assert_eq!(e["t"], 9.0);
+        assert_eq!(e["f_lo"], 100e6);
+        assert_eq!(e["f_hi"], 112e6);
+        assert_eq!(e["departed"], json!({ "f_lo": 100e6, "f_hi": 102e6 }));
+        assert_eq!(e["arrived"], json!({ "f_lo": 110e6, "f_hi": 112e6 }));
+        // Stated once: the next reading of the same band is quiet.
         assert!(
-            ROUTES
-                .iter()
-                .any(|(m, p)| *m == "GET" && *p == "/ws/changes")
+            w.step(map(&[t("a", 110e6, 112e6, 9_000_000_000)]))
+                .is_empty()
         );
     }
 
     #[test]
-    fn the_snapshot_names_every_route_and_the_tick() {
-        let feed = ChangeFeed::default();
-        feed.bump_all(routes_for_write("/api/control/center"));
-        let m = versions_message(&feed);
-        assert_eq!(m["type"], json!("versions"));
-        assert_eq!(m["tick_ms"], json!(250));
-        for c in Change::ALL {
-            assert!(m["routes"][c.route()].is_u64(), "{}: {m}", c.route());
-        }
-        assert_eq!(m["routes"]["/api/control/state"], json!(1));
-        assert_eq!(m["routes"]["/api/inventory"], json!(0));
-        let c = changed_message(Change::Coverage, 3);
-        assert_eq!(
-            (c["type"].clone(), c["route"].clone(), c["version"].clone()),
-            (json!("changed"), json!("/api/coverage"), json!(3))
+    fn appearing_is_a_change_vanishing_and_lagging_are_not() {
+        let mut w = ChangeWatch::new(map(&[t("a", 100e6, 102e6, 10)]));
+        let ev = w.step(map(&[t("a", 100e6, 102e6, 10), t("b", 5e6, 7e6, 20)]));
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0]["device"], "b");
+        assert_eq!(ev[0]["departed"], Value::Null);
+        assert!(
+            w.step(map(&[t("b", 5e6, 7e6, 20)])).is_empty(),
+            "a is gone: silence"
         );
-        assert!(c["t_s"].as_f64().is_some_and(|t| t > 1.7e9));
+        assert!(
+            w.step(map(&[t("a", 100e6, 102e6, 10), t("b", 1e6, 3e6, 15)]))
+                .is_empty(),
+            "an older reading is a lagging source, not a move back"
+        );
     }
 }

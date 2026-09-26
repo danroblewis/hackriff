@@ -116,8 +116,13 @@ async function main(): Promise<void> {
   text(slot("note"), probe.note);
   text(slot("edge"), `newest recorded ${at(probe.origin.edgeNs)}`);
   const census = probe.census;
+  // **Each share says which axis it is of** (T-1055). This line counts (time x frequency) CELLS;
+  // the banner above it quotes `census.bands`, the frequency-axis share. Unlabelled, the two read as
+  // a contradiction — a finished full-range pass put *"100 % ... was ever sampled"* directly above
+  // *"(4.3 % sampled)"* — and the cell share is the honest smaller one (a radio sees one window at a
+  // time), so the fix is to name the axis, never to drop either number.
   text(slot("census"), census.total
-    ? `coverage map: ${census.observed} observed · ${census.unobserved} unobserved · ${census.unknown} past the horizon (${fmtShare(census.observed, census.total)} sampled)`
+    ? `coverage map: ${census.observed} observed · ${census.unobserved} unobserved · ${census.unknown} past the horizon (${fmtShare(census.observed, census.total)} of cells; ${fmtShare(census.bands.observed, census.bands.total)} of the frequency range)`
     : "coverage map: none returned");
   slot("provenance").replaceChildren(
     h("li", {}, `frequency extent — ${probe.origin.provenance.freq}`),

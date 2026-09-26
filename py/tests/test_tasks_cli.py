@@ -213,6 +213,32 @@ def test_set_allows_blocked_with_blocked_on_in_the_same_call(board: Path) -> Non
     assert t2["blocked_on"] == "waiting on hardware"
 
 
+def test_set_replaces_a_block_style_list_field(board: Path) -> None:
+    """T-1059: `deps:` / `- T-001` (block style, what `task new --depends-on` writes) must be
+    REPLACED by `set`, not appended-to as a second `deps:` key (T-1055's board-merge failure)."""
+    before = _text(board)
+    assert "    deps:\n    - T-001" in before  # the fixture's block-style list, sanity check
+    assert run(["set", "T-002", "deps=[T-003, T-001]", "--file", str(board)]) == 0
+    text = _text(board)
+    _, blocks, _, _ = tasks.find_block(text, "T-002")
+    assert blocks["T-002"].count("    deps:") == 1  # not a second `deps:` key
+    doc = yaml.safe_load(text)
+    t2 = next(t for t in doc["tasks"] if t["id"] == "T-002")
+    assert t2["deps"] == ["T-003", "T-001"]
+
+
+def test_unset_removes_a_block_style_list_field(board: Path) -> None:
+    """`unset` must drop every `- item` continuation line, not just the `deps:` header line
+    (leaving orphaned `    - T-001` lines is invalid YAML, T-1059)."""
+    assert run(["unset", "T-002", "deps", "--file", str(board)]) == 0
+    text = _text(board)
+    _, blocks, _, _ = tasks.find_block(text, "T-002")
+    assert "deps" not in blocks["T-002"]
+    doc = yaml.safe_load(text)
+    t2 = next(t for t in doc["tasks"] if t["id"] == "T-002")
+    assert "deps" not in t2
+
+
 def test_set_unknown_ticket_fails(board: Path, capsys) -> None:
     assert run(["set", "T-999", "status=done", "--file", str(board)]) != 0
     assert "no such ticket" in capsys.readouterr().err
@@ -394,6 +420,18 @@ def test_validate_catches_unknown_status(board: Path, capsys) -> None:
     board.write_text(bad, encoding="utf-8")
     assert run(["validate", "--file", str(board)]) != 0
     assert "vocabulary" in capsys.readouterr().err
+
+
+def test_validate_catches_a_duplicate_key_in_one_block(board: Path, capsys) -> None:
+    """T-1059/T-1055: a duplicate `key:` in one ticket's block is a lost `- id:` line — yaml.safe_load
+    silently keeps the last value, so this must be a textual check, not a parsed-doc one."""
+    bad = _text(board).replace(
+        "    deps:\n    - T-001\n", "    deps:\n    - T-001\n    deps: [T-003]\n", 1
+    )
+    board.write_text(bad, encoding="utf-8")
+    assert run(["validate", "--file", str(board)]) != 0
+    err = capsys.readouterr().err
+    assert "T-002" in err and "'deps'" in err and "twice" in err
 
 
 # --------------------------------------------------------------------------------------------

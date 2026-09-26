@@ -91,6 +91,9 @@ fn ais_recipe_uses_gmsk_9600_nrzi_hdlc_and_crc16_x25() {
         Some(0x7E)
     );
     assert_eq!(sync["terminator"]["trailer_bits"].as_u64(), Some(0));
+    // T-1054: HDLC shares one flag between frames — the closing flag opens the next frame, so a
+    // noise-born flag between bursts cannot swallow a real burst's opening flag.
+    assert_eq!(sync["terminator"]["reopen"], serde_json::json!(true));
 
     let crc = node("crc");
     assert_eq!(crc["width"].as_u64(), Some(16));

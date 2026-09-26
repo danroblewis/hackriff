@@ -52,6 +52,8 @@
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
+//! | `/ws/tiles/changes` | GET | token | `coverage_changed` pushed on a retune (T-1040, [`crate::changes`]) |
+//! | `/ws/changes` | GET | token | `changed {route, version}` instead of a poll (T-1065, [`crate::versions`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -253,7 +255,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/analyze/{id}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
     ("GET", "/ws/tiles/rows"),
-    // T-1065 the versioned change feed: `changed {route, version}` instead of a client poll
+    // T-1040: `coverage_changed` pushed on a front-end move, so a retune re-lays the fog at once
+    ("GET", "/ws/tiles/changes"),
+    // T-1065 the route-version feed: `changed {route, version}` instead of a client poll
     ("GET", "/ws/changes"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
@@ -499,6 +503,9 @@ pub struct ApiState {
     /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
     /// Per state for the same reason as `tile_admission`.
     pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
+    /// T-1040: `/ws/tiles/changes` subscriptions open now, capped at
+    /// [`crate::changes::MAX_CHANGE_FEEDS`].
+    pub change_feeds: Arc<std::sync::atomic::AtomicUsize>,
     /// T-579: the per-lattice readable ceiling, memoised — a pure function of the store's
     /// geometry and config, so it is computed once per lattice rather than probed per request.
     /// Shared by cloning, like [`Self::tile_admission`].
@@ -506,12 +513,13 @@ pub struct ApiState {
     /// T-579: the tile coverage raster, memoised against the tune history it is computed from.
     /// Always on: its key is the evidence itself, so it cannot serve a stale grey.
     pub coverage_raster: Arc<crate::coverage::CoverageRasterMemo>,
-    /// T-1065: the versioned change feed behind `/ws/changes`. Every mutating control-plane route
-    /// bumps the version of the routes it wrote (`changes::routes_for_write`, applied once in
+    /// T-1065: the **route-version** feed behind `/ws/changes` (not [`Self::change_feeds`], which
+    /// counts T-1040's coverage subscriptions). Every mutating control-plane route bumps the version
+    /// of the routes it wrote (`versions::routes_for_write`, applied once in
     /// `control::dispatch_device`), and a producer may bump one directly. Always on: a server
     /// without it would silently answer the feed with a table that never moves, and a client that
-    /// had stopped polling would never learn.
-    pub changes: Arc<crate::changes::ChangeFeed>,
+    /// had stopped polling would never learn. Its own open-connection count lives inside it.
+    pub versions: Arc<crate::versions::VersionFeed>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -1295,12 +1303,16 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         }
     }
     // T-1065: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
+    // `/ws/changes` is the route-version feed; `/ws/tiles/changes` below is T-1040's coverage feed.
     if req.path == "/ws/changes" && req.method == "GET" {
-        return crate::changes::serve(stream, &shared.state, &req.headers);
+        return crate::versions::serve(stream, &shared.state, &req.headers);
     }
     // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
         return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
+    }
+    if req.path == "/ws/tiles/changes" && req.method == "GET" {
+        return crate::changes::serve(stream, &shared.state, &req.query, &req.headers);
     }
     // T-859: `/ws/analyze/{id}` is the `analyze` on-demand opener with the id as its parameter.
     if let Some(id) = req.path.strip_prefix("/ws/analyze/")
@@ -1419,7 +1431,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         // T-1065: a validator on the routes a client re-reads unchanged (`/api/control/state`,
         // 10 kB every 2 s in the measured client). Only a successful GET: a 4xx body is a sentence,
         // and a write must never be answered from a cache.
-        if req.method == "GET" && r.status == 200 && crate::changes::validated(&req.path) {
+        if req.method == "GET" && r.status == 200 && crate::versions::validated(&req.path) {
             return respond_validated(&mut stream, &req, &r.body, &extra);
         }
         return respond_json_with(&mut stream, r.status, &r.body, &extra);
