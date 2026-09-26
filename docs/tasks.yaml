@@ -30784,7 +30784,7 @@ tasks:
   - id: T-1053
     milestone: MMAP
     title: "Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI-T1028-FOLLOWUP
@@ -30810,6 +30810,7 @@ tasks:
       Commits: bf7d2920
       Observed, not chased: scan-overlay.e2e.mjs 'Start: the steps the engine executes ... are the steps the overlay drew' failed once under load avg ~39: executed step 0 was centred on 96323737 Hz, but the overlay drew step 0 at 94861849 Hz (the log shows a 94861849 step began 0.56 s before the Start timestamp). It passed on an immediate rerun and on the old code. It looks like a start-instant race to hand to the deflaker, not a product regression.
       Resources: 261 CPU-s, peak 3.5 GB
+    commit: 538a64dc
   - id: T-1054
     milestone: MAUTO
     title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
