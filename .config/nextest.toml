@@ -10,8 +10,8 @@
 #     (T-631), and note that hk-e2e only started reading this file at all in T-631.
 #   - hk-pipeline: tests named listen*/retune*/lossless*/refine*/stream* exercise
 #     live retune/listen/streaming timing against a running pipeline, and
-#     replumb_never_pays_for_the_ring (T-536) asserts a wall-clock bound on how long a
-#     re-plumb may stall capture.
+#     replumb_never_pays_for_the_ring (T-536) drives whole re-plumbs against a running
+#     pipeline (its wall-clock stall bound is in the `timing` tier since T-973).
 #   - hk-api, hk-cli: bind real TCP/WebSocket ports and (hk-cli) spawn the daemon
 #     process, so concurrent runs can collide on ports or process lifecycle.
 #   - hk-core: ring_concurrency/ring_stress race real reader/writer threads against
@@ -217,6 +217,12 @@ fail-fast = false
 # unchanged and nothing is #[ignore]d: the run was SPLIT, and its deterministic half
 # (hk-model::detection_writes_are_all_readable_and_the_rate_is_reported - every written row read
 # back through the region query, the rate computed from those rows and stated) gates normally.
+# T-973 added the bound on how long a re-plumb with the IQ ring open may stall the always-on readers (T-536's 1 s): measured, the
+# stall is hk-history's segment-end tile writes and fsyncs (0.2-0.9 s at load ~25, 1.8 s and
+# 13.1 s during gates) with the ring's share zero, so on a shared box it measures the disk. Its
+# deterministic half, the ring's allocation paid by its own thread and a re-plumb completing
+# with that allocation still outstanding, gates normally
+# (hk-pipeline::replumb_never_pays_for_the_ring::a_re_plumb_never_pays_for_the_iq_ring).
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
@@ -229,6 +235,7 @@ not (
   or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
   or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
   or test(the_detection_write_rate_clears_its_floor)
+  or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
 )
 '''
 
@@ -509,4 +516,5 @@ or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_sta
 or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 or test(the_detection_write_rate_clears_its_floor)
+or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
 '''

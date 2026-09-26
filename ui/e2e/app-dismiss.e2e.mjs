@@ -68,17 +68,20 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   // T-995: the minimap is retired (user, 2026-09-25) — no map viewport row, at any width.
   assert.equal(await page.$count('.hk-surface-viewport[data-viewport="minimap"]'), 0,
     `a minimap viewport is still drawn at ${width} px`);
-  // T-933, carried to the panes: what used to be the minimap's lift is now the panes' bottom edge,
-  // and it must clear the sheet's peek strip (never hidden — T-803) at every width. The sheet
-  // starts at peek here (the reset above), so this is the every-width, no-interaction case;
-  // `insetBottom` is `surface.ts`'s own lift, read off the canvas the way the surface itself
-  // states it (`canvas.dataset.insetBottom`), never a second guess at it.
+  // T-996's full-bleed amendment (user, 2026-09-25 20:20): "nothing reserves a band at the top or
+  // bottom of the canvas". It supersedes T-933's rule that the panes stop short of the sheet's peek
+  // strip: the panes run to the canvas's own edges (both insets 0, `canvas.dataset.inset*`, read
+  // the way the surface states them), and the peek strip floats OVER map pixels like every other
+  // overlay. What T-933 protected still holds, and is asserted: the strip covers none of the
+  // picture's honesty statements (the status line, each pane's scale block).
   const insets = await page.canvasInsets();
-  const paneBottom = bleed.y + bleed.h - insets.bottom;
   const peek = await page.$rect(".sheet");
-  t.diagnostic(`at ${width} px pane bottom y ${Math.round(paneBottom)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
-  assert.ok(paneBottom <= peek.y + 0.5,
-    `the panes' bottom edge (y ${Math.round(paneBottom)}) runs under the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) at ${width} px`);
+  t.diagnostic(`at ${width} px insets ${JSON.stringify(insets)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
+  assert.deepEqual([insets.top, insets.bottom], [0, 0], `a band is reserved at the canvas's edge at ${width} px: ${JSON.stringify(insets)}`);
+  const covered = await page.eval(`(() => { const s = document.querySelector('.sheet').getBoundingClientRect();
+    return [...document.querySelectorAll('.sf-status-line, .sf-scale:not([hidden])')].map((e) => [e.className, e.getBoundingClientRect()])
+      .filter(([, r]) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top).map(([c]) => c); })()`);
+  assert.deepEqual(covered, [], `the sheet's peek strip covers an honesty statement at ${width} px`);
 
   // (1) Each overlay alone: open from its small control, visible close, map back after.
   for (const o of OVERLAYS) {

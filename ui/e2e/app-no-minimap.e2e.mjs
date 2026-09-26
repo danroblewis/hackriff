@@ -26,8 +26,6 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 // (fog-of-war +8, scan-everything +12, surface-retune +16, ring-drop +20, shadow-level/app-top-chrome +24).
 const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 28;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
-/** Height of the spectrum-trace strip above each pane, device px (`TRACE_PX`, app/centre/surface.ts). */
-const TRACE_PX = 96;
 /** `DEVICE_MARKS[0]` (surface/minimap.ts), the first front end's live-segment colour, as 8-bit RGB. */
 const DEVICE0 = [0.30, 0.88, 0.60].map((c) => Math.round(c * 255));
 
@@ -108,9 +106,8 @@ for (const [width, height] of [[1280, 800], [400, 800]]) test(`at ${width} x ${h
   const rect = await page.$rect(".sf-canvas");
   const dpr = await page.eval("window.devicePixelRatio || 1");
   const ins = await page.canvasInsets();
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
-  const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  const top = Math.round((rect.y + ins.top) * dpr + traceH);
+  // T-1041: the pane's first row is the inset itself — the trace reserves nothing.
+  const top = Math.round((rect.y + ins.top) * dpr);
   // Where the segment must be: the tuned window's centre through the pane's own frequency mapping
   // (the readout `w` the zoom-out loop ended on), +-8 CSS px for the 2 px drawing floor and rounding.
   const mid = (tuned.f_lo_hz + tuned.f_hi_hz) / 2;

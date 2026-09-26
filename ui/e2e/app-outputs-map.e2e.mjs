@@ -28,33 +28,66 @@ const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
 const ACTIVE_RGB = [245, 84, 158]; // marks.ts ACTIVE_MARK (0.96, 0.33, 0.62)
 
+/** A press point on a box's hit rectangle that the CANVAS actually receives: the point under it is
+ * `.sf-canvas` and not a piece of floating chrome. Scans DOWN the box's visible extent rather than
+ * taking the box's top — at 400 px every box starts at the canvas top and the mode strip (`.mode`)
+ * floats over exactly that band, so the single point 24 px below the top is the mode button on
+ * every box but the leftmost (measured on main at 6f38fbb8 with a freshly built `hk`: pins at
+ * x=157 and x=250 both answered `mode` at y=122 and `sf-canvas` from y=178 down, so step 6 could
+ * never find a pressable box and timed out at 60 s — the T-1002/T-1004 red). Pressing where the
+ * box IS exposed is the same act, not a weaker one: still a press on the canvas, over that box. */
+const PRESS_IN = `(r, c, minW, minH) => {
+  const x0 = Math.max(r.x, c.x + 24), x1 = Math.min(r.right, c.right - 24);
+  const y0 = Math.max(r.y, c.y + 8), y1 = Math.min(r.bottom, c.bottom - 8);
+  if (x1 - x0 < minW || y1 - y0 < minH) return null;
+  const x = (x0 + x1) / 2;
+  for (let y = y0 + Math.min(24, (y1 - y0) / 2); y <= y1; y += 24) {
+    const top = document.elementFromPoint(x, y);
+    if (top && top.classList.contains('sf-canvas')) return { x, y };
+  }
+  return null;
+}`;
+
 /** The detection box (a `.sf-pin.area` hit area over the box the overlay draws) best placed to be
  * pressed: wide and tall enough, clear of the floating chrome (the canvas is what is under its
- * press point), newest first — and, when `inside` names the tuned window, well inside it, because
- * Listen demodulates live IQ and the server rightly refuses (409) a channel outside the window.
- * Returns its id, a press point inside it and its area. */
+ * press point — [[PRESS_IN]]), newest first — and, when `inside` names the tuned window, well
+ * inside it, because Listen demodulates live IQ and the server rightly refuses (409) a channel
+ * outside the window. Returns its id, a press point inside it and its area. */
 let inside = null; // { lo, hi } Hz, set once the tuning is read
 const BOX_AT = (minW = 16, minH = 16) => `(() => {
   const c = document.querySelector('.sf-canvas').getBoundingClientRect();
+  const pressIn = ${PRESS_IN};
   const inside = ${JSON.stringify(inside)};
   let best = null;
   for (const p of document.querySelectorAll('.sf-pins .sf-pin.detection.area')) {
     const mhz = Number(/at ([\\d.]+) MHz/.exec(p.getAttribute('aria-label') ?? '')?.[1]);
     if (inside && !(mhz * 1e6 > inside.lo && mhz * 1e6 < inside.hi)) continue;
     const r = p.getBoundingClientRect();
-    const x0 = Math.max(r.x, c.x + 24), x1 = Math.min(r.right, c.right - 24), y0 = Math.max(r.y, c.y + 8), y1 = Math.min(r.bottom, c.bottom - 8);
-    if (x1 - x0 < ${minW} || y1 - y0 < ${minH}) continue;
-    const x = (x0 + x1) / 2, y = y0 + Math.min(24, (y1 - y0) / 2);
-    const top = document.elementFromPoint(x, y);
-    if (!top || !top.classList.contains('sf-canvas')) continue;
+    const at = pressIn(r, c, ${minW}, ${minH});
+    if (!at) continue;
     // Confirmed first: a Candidate may be merged or expire mid-spec (candidates churn by design), and
     // then its box is gone with its badge. Then newest.
     const conf = p.classList.contains('confirmed');
-    if (!best || (conf && !best.conf) || (conf === best.conf && r.y < best.area.y0)) best = { id: p.dataset.pin, x, y, conf, area: { x0: r.x, y0: r.y, x1: r.right, y1: r.bottom } };
+    if (!best || (conf && !best.conf) || (conf === best.conf && r.y < best.area.y0)) best = { id: p.dataset.pin, x: at.x, y: at.y, conf, area: { x0: r.x, y0: r.y, x1: r.right, y1: r.bottom } };
   }
   return best;
 })()`;
 const box = async (page, minW, minH) => JSON.parse(await page.eval(`JSON.stringify(${BOX_AT(minW, minH)})`));
+
+/** Wait for a pressable box and RETURN THAT BOX — chosen in the evaluation that answered, not in a
+ * second one. `waitFor(!!BOX_AT())` followed by `box()` asks twice, and the boxes churn by design
+ * (T-1049 measured a box's rectangle moving hundreds of pixels between two polls), so the second
+ * ask could answer `null` after the first said yes: `Cannot read properties of null (reading 'id')`.
+ * Same predicate, same timeout — only asked once. */
+async function waitBox(page, why, { minW, minH, timeoutMs = 120000, everyMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const b = await box(page, minW, minH);
+    if (b) return b;
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${why}`);
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
 
 /** Fixed-position bars pinned to the bottom edge spanning most of the width. The T-803 sheet is
  * excluded by name: its peek strip is the Selected panel's own closeable overlay, not an outputs
@@ -80,18 +113,25 @@ const waitPlaced = (page, id, fail) => page.waitFor(`box ${id.slice(0, 8)} to be
 const ACTIVE_BTN = (id) => `!!document.querySelector('.sf-pins .sf-pin.active[data-pin=${JSON.stringify(id)}]')`;
 
 /** Pixels near ACTIVE_MARK in the band just OUTSIDE a box's left edge (where no badge sits — the
- * badge is at the top-right), i.e. the GL halo, not the DOM. */
-async function haloPixels(page, area) {
+ * badge is at the top-right), i.e. the GL halo, not the DOM. Reports the whole frame's near-mark
+ * pixels too, so a red says WHICH failure it is: `total: 0` = the halo was never drawn this frame;
+ * a total with an empty band = it was drawn somewhere this band does not cover. (Both shapes were
+ * observed on main at 6f38fbb8 while triaging T-1049; the message used to say only `0 → 0`.) */
+async function haloScan(page, area) {
   const img = await page.shot();
   const x0 = Math.max(0, Math.floor(area.x0 - 12)), x1 = Math.max(0, Math.floor(area.x0) - 1);
   const y0 = Math.max(0, Math.floor(area.y0 + 16)), y1 = Math.min(img.height - 1, Math.floor(area.y1 - 4));
+  const near = (i) => Math.abs(img.data[i] - ACTIVE_RGB[0]) + Math.abs(img.data[i + 1] - ACTIVE_RGB[1])
+    + Math.abs(img.data[i + 2] - ACTIVE_RGB[2]) < 60;
   let n = 0;
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-    const i = (y * img.width + x) * 4;
-    const d = Math.abs(img.data[i] - ACTIVE_RGB[0]) + Math.abs(img.data[i + 1] - ACTIVE_RGB[1]) + Math.abs(img.data[i + 2] - ACTIVE_RGB[2]);
-    if (d < 60) n++;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (near((y * img.width + x) * 4)) n++;
+  let total = 0, bx0 = Infinity, by0 = Infinity, bx1 = -1, by1 = -1;
+  for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) {
+    if (!near((y * img.width + x) * 4)) continue;
+    total++;
+    if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
   }
-  return n;
+  return { n, total, band: [x0, y0, x1, y1], bbox: total ? [bx0, by0, bx1, by1] : null };
 }
 
 async function rightClick(page, at) {
@@ -106,7 +146,9 @@ async function openMenuOn(page, id) {
     const b = await box(page, 8, 8);
     const at = b && b.id === id ? b : JSON.parse(await page.eval(`JSON.stringify((() => {
       const el = document.querySelector('.sf-pins .sf-pin.area[data-pin=${JSON.stringify(id)}]'); if (!el) return null;
-      const r = el.getBoundingClientRect(); return { x: r.x + Math.min(r.width / 2, 40), y: r.y + Math.min(r.height / 2, 20) }; })())`));
+      const c = document.querySelector('.sf-canvas').getBoundingClientRect();
+      // Same rule as BOX_AT: a point the canvas receives, not the box's top under the chrome.
+      return (${PRESS_IN})(el.getBoundingClientRect(), c, 8, 8); })())`));
     if (!at) throw new Error(`box ${id} is no longer on the canvas`);
     await rightClick(page, at);
     const open = await page.eval(`!!document.querySelector('.ctx-menu:not([hidden])')`);
@@ -138,7 +180,7 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   const ctl = JSON.parse(await page.eval(`${authed(backend.token, "GET", "/api/control/state")}.then((r) => JSON.stringify(r.tuning ?? r.devices?.[0]?.tuning ?? null))`));
   if (ctl && ctl.center_hz && ctl.sample_rate_hz) inside = { lo: ctl.center_hz - 0.3 * ctl.sample_rate_hz, hi: ctl.center_hz + 0.3 * ctl.sample_rate_hz };
   t.diagnostic(`tuned: ${JSON.stringify(ctl)} → boxes chosen inside ${JSON.stringify(inside)}`);
-  await page.waitFor("blind detection to put a pressable box on the canvas", `!!${BOX_AT()}`, { timeoutMs: 120000, everyMs: 500 }).catch(fail);
+  await waitBox(page, "blind detection to put a pressable box on the canvas").catch(fail);
   await page.frames(3);
 
   // (1) No dock bar, nothing reserved at the bottom while nothing is open.
@@ -148,9 +190,9 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   await shot("1-no-dock");
 
   // (2) Right-click a box → its menu, with every action named.
-  const target = await box(page);
+  const target = await waitBox(page, "a pressable box to right-click").catch(fail);
   const id = target.id;
-  const haloBefore = await haloPixels(page, target.area);
+  const haloBefore = await haloScan(page, target.area);
   const labels = await openMenuOn(page, id);
   t.diagnostic(`menu on ${id.slice(0, 8)}: ${labels.join(" | ")}`);
   for (const want of ["Listen", "Record clip", "Stream out", "Analyze", "Go to"]) assert.ok(labels.includes(want), `the box menu lacks ${want}: ${labels}`);
@@ -168,9 +210,11 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   assert.match(await page.eval(`document.querySelector('.sf-pin[data-pin=${JSON.stringify(id)}]').getAttribute('aria-label')`), /active: listening/);
   const area = JSON.parse(await page.eval(`JSON.stringify((() => { const r = document.querySelector('.sf-pins .sf-pin.area[data-pin=${JSON.stringify(id)}]')?.getBoundingClientRect();
     return r ? { x0: r.x, y0: r.y, x1: r.right, y1: r.bottom } : null; })())`)) ?? target.area;
-  const haloOn = await haloPixels(page, area);
-  t.diagnostic(`halo pixels left of the box: before ${haloBefore}, while listening ${haloOn}`);
-  assert.ok(haloOn > haloBefore + 10, `the GL overlay drew no active halo outside the box (${haloBefore} → ${haloOn})`);
+  const haloOn = await haloScan(page, area);
+  const halos = `before ${JSON.stringify(haloBefore)} (box ${JSON.stringify(target.area)}), while listening ${JSON.stringify(haloOn)} (box ${JSON.stringify(area)})`;
+  t.diagnostic(`halo pixels left of the box: ${halos}`);
+  await shot("3-halo");
+  assert.ok(haloOn.n > haloBefore.n + 10, `the GL overlay drew no active halo outside the box: ${halos}`);
   // The strip: small, and every former dock action is on it.
   assert.equal(await page.eval(`document.querySelector('.out-strip').hidden`), false);
   const acts = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.out-strip .out button')].map((b) => b.dataset.action))`));
@@ -221,8 +265,7 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   }, page.sessionId);
   let opened = false, phoneLabels = [];
   for (let tries = 0; tries < 6 && !opened; tries++) {
-    await page.waitFor("a pressable box at 400 px", `!!${BOX_AT(12, 12)}`, { timeoutMs: 60000, everyMs: 500 }).catch(fail);
-    const b = await box(page, 12, 12);
+    const b = await waitBox(page, "a pressable box at 400 px", { minW: 12, minH: 12, timeoutMs: 60000 }).catch(fail);
     await touch("touchStart", [[b.x, b.y]]);
     await new Promise((r) => setTimeout(r, 700)); // past HOLD_TO_MARK_MS (450 ms): a long-press, not a tap
     await touch("touchEnd", []);

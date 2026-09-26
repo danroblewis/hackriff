@@ -110,3 +110,27 @@ export function outlineBox(rect: PaneRect, canvasHpx: number, dpr: number): { le
     height: rect.h * k,
   };
 }
+
+/** A box in CSS px from the canvas's top-left. */
+export interface CssBox { left: number; top: number; width: number; height: number }
+
+/**
+ * **Where a pane's close button goes (T-1005)** — its top-right corner, unless floating chrome (the
+ * zoom stack, the FAB, the corner clusters, the status chips) is there, in which case it steps LEFT
+ * along the pane's top edge, then DOWN its right edge, until it is clear. A button under the chrome
+ * is a button nobody can press — the bottom pane of a stacked split put its × under the zoom stack,
+ * and at a phone width the status chips cover the whole top edge of the right-hand pane. With no
+ * clear spot the corner is returned (the viewport menu's Close still closes the pane).
+ */
+export function closeButtonSpot(pane: CssBox, obstacles: readonly CssBox[], size = 24, inset = 6): { left: number; top: number } {
+  const hits = (left: number, top: number) => obstacles.some((o) =>
+    left < o.left + o.width && left + size > o.left && top < o.top + o.height && top + size > o.top);
+  const corner = { left: pane.left + pane.width - size - inset, top: pane.top + inset };
+  for (let left = corner.left; left >= pane.left + inset; left -= size + 8) {
+    if (!hits(left, corner.top)) return { left, top: corner.top };
+  }
+  for (let top = corner.top + size + 8; top + size <= pane.top + pane.height - inset; top += size + 8) {
+    if (!hits(corner.left, top)) return { left: corner.left, top };
+  }
+  return corner;
+}
