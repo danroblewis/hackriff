@@ -94,8 +94,6 @@ const ZOOM = { shift: true }; // frequency-only (T-472): every claim below is ab
 const ZOOM_IN_DELTA = -400;
 const ZOOM_OUT_DELTA = 600;
 
-// The spectrum-trace strip (top of each pane), as in canvas-journey.e2e.mjs. (No minimap strip since T-995.)
-const TRACE_PX = 96;
 
 // Band A: the recording's own live FM signal (pilot + RDS), strong and real. Band B: far outside
 // the 2.4 MHz recording, noise-floor-served but a genuine capture. Band C: never touched.
@@ -974,9 +972,10 @@ async function harvestMarks(browser, backend) {
 function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
   // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
   // them since T-995 retired the minimap).
+  // T-1041: the trace reserves nothing any more (it is a layer over the pane's top rows, off by
+  // default), so the pane's measurement starts at the inset — its own first row.
   const paneH = (rect.h - ins.top - ins.bottom) * dpr;
-  const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top, h: paneH / dpr };
 }
 /**
  * The pane, narrowed to the columns nothing foreign covers (T-801). Since MAP-01 the app's canvas

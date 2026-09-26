@@ -12686,6 +12686,45 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
         Some(FIXTURE_CENTER_HZ),
         "pricing a sweep moved the radio"
     );
+    // T-1008: the plan's steps, for a client to DRAW rather than re-derive — only when asked for
+    // (`windows=1`), and they tile the priced range: twelve slices, contiguous, in visit order.
+    assert!(
+        p["plan"].get("windows").is_none(),
+        "windows are opt-in on GET: {p}"
+    );
+    assert!(
+        v["scan"]["device_id"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("mock:")),
+        "the scan names the front end it would sweep, before the button: {v}"
+    );
+    let (st, v) = get(
+        addr,
+        "/api/control/scan?f_lo_hz=88000000&f_hi_hz=108000000&dwell_s=12&windows=1",
+    );
+    assert_eq!(st, 200, "{v}");
+    let windows = v["proposed"]["plan"]["windows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(windows.len(), 12, "one slice per step: {v}");
+    let wf = |w: &Value, k: &str| w[k].as_f64().unwrap_or(f64::NAN);
+    assert!((wf(&windows[0], "lo_hz") - 88e6).abs() < 1.0, "{windows:?}");
+    assert!(
+        (wf(&windows[11], "hi_hz") - 108e6).abs() < 1.0,
+        "{windows:?}"
+    );
+    for (i, w) in windows.iter().enumerate() {
+        assert_eq!(w["step"], json!(i), "{w}");
+        if i > 0 {
+            assert!(
+                (wf(w, "lo_hz") - wf(&windows[i - 1], "hi_hz")).abs() < 1.0,
+                "the slices tile the range without gap or overlap: {windows:?}"
+            );
+        }
+    }
+    let (st, v) = get(addr, "/api/control/scan?windows=2");
+    assert_eq!(st, 400, "windows is 1 or 0, nothing else: {v}");
 
     // A dwell outside the 10-30 s the survey is sized for still runs, and says it is unusual
     // rather than being clamped to one band's taste (T-406).
@@ -12718,6 +12757,18 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     );
     assert_eq!(v["scan"]["state"], json!("running"), "{v}");
     assert_eq!(v["scan"]["plan"]["steps"], json!(12), "{v}");
+    // T-1008: the start answer carries the steps it committed to — the ones priced above.
+    assert_eq!(
+        v["scan"]["plan"]["windows"],
+        json!(windows),
+        "the started plan is the priced plan: {v}"
+    );
+    assert!(
+        get(addr, "/api/control/state").1["scan"]["plan"]
+            .get("windows")
+            .is_none(),
+        "the polled state stays compact"
+    );
 
     // It steps: the tune moves off the fixture's own centre, through the device path.
     wait_for(
@@ -12738,6 +12789,20 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
         (88e6..=108e6).contains(&swept),
         "a step must land inside the range asked for: {v}"
     );
+    // T-1008: the step being dwelt on is named, and it is the drawn window whose centre is tuned.
+    let (_, v) = get(addr, "/api/control/scan");
+    if let (Some(d), Some(c)) = (
+        v["scan"]["progress"]["dwell_step"].as_u64(),
+        v["scan"]["progress"]["center_hz"].as_f64(),
+    ) {
+        let tol = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+        assert!(
+            (wf(&windows[d as usize], "center_hz") - c).abs() <= tol,
+            "dwell_step {d} is not the step tuned to {c}: {v}"
+        );
+    } else {
+        panic!("a running sweep that has stepped names the step it dwells on: {v}");
+    }
 
     // T-965: **a step has now been timed, so the stated pass length includes what it cost.**
     // The live defect this closes: `Scan everything (fast)` priced 418 steps x 0.3 s as 125.4 s
@@ -12818,6 +12883,17 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
         stepped.len() >= 2,
         "the sweep must write one record per step, each with its own centre: {stepped:?}"
     );
+    // T-1008: THE PLAN DRAWN IS THE PLAN EXECUTED — every per-step record the sweep wrote is
+    // centred on one of the windows the scan served for drawing (to the tuning step).
+    let tol = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    for c in &stepped {
+        assert!(
+            windows
+                .iter()
+                .any(|w| (wf(w, "center_hz") - c).abs() <= tol),
+            "the sweep tuned {c} Hz, which is no window the plan served: {windows:?}"
+        );
+    }
     let widest = stepped.last().unwrap() - stepped.first().unwrap();
     assert!(
         widest > 1.0,
