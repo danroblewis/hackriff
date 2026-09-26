@@ -30923,6 +30923,24 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor: Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it
     core_interface: true
     high_effort_reason: the user's design replaces the shadow mechanism across hk-store ingest, the tile route and a new route; persisted state + capture-thread cost (T-453) + the ADR-0020 last-known tier contract
+  - id: T-1059
+    milestone: M2-hardening
+    title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: TASK-CLI
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      FOUND 2026-09-26 by the coordinator (board branch task-board-0926ax): py/hkpy/tasks.py has two defects on list-valued keys written in BLOCK style (`deps:` then `- T-964` lines at the SAME indentation as the key, which is how `just task new --depends-on` writes them):
+      1. `just task set T-1055 'deps=[T-964, T-1058]'` did not replace the block list - it appended a second `deps: [...]` key. yaml.safe_load keeps the last, so `just task validate` passed, but the block now declares `deps` twice (hkpy.boardmerge caught it: "T-1055: declares 'deps' twice, which is a lost `- id:` line") and every later board merge refuses.
+      2. `just task unset T-1055 deps` cannot remove a block list: _unset_field removes the key line but not its `- item` lines (same indentation, not recognised as continuation), producing invalid YAML - which the write-validator correctly refused and restored.
+      DELIVER: treat `- ` lines at the key's indentation directly after a key with an empty value as that key's continuation, in both set (replace the whole value) and unset (remove it); `validate` fails on any duplicate key within one ticket block (the check boardmerge already does). Tests in py/tests (test_tasks_cli or the existing task tests): set replaces a block list; unset removes it; validate rejects a duplicated key - each red on the current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q <the task-CLI tests>`, `just lint-py`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-26 (T-1055 duplicate deps): task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
