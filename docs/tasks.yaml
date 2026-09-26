@@ -28676,7 +28676,7 @@ tasks:
   - id: T-967
     milestone: MMAP
     title: Decoded identity (PI/PS etc.) is not shown in the inventory list rows
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-LIST-IDENT
@@ -28692,6 +28692,7 @@ tasks:
 
       2026-09-25 recovery: stranded after the ~12:50 bulk conflict-skip; merged gated base 673a5d4e. Conflict: hk-model/src/lib.rs decode:: re-exports (kept T-967's DecodeIdentitySummary AND T-988's DcsCode/Subaudible/SubaudibleKind/SubaudibleTone). Semantic fix after T-962: hk_demod::rds::PiDecision gained non-default window_votes/provisional, so t967_identity_label's hand-built WfmReport failed to deserialize ('missing field provisional'); it now states a committed PI (window_votes 97, provisional false). identity_label reads only rows whose identity_value is the committed PI, so a T-962 provisional session (identity None) never labels a row. Tests: hk-model 419, t967_identity_label 1, hk-api 334, hk-cli api_contract 75, ui tsc + 100/100 test files; precheck clean.
     branch: task-t967
+    commit: 690bc342
   - id: T-968
     milestone: M2-hardening
     title: hk-store a_disk_stall_longer_than_the_disconnect_policy test fails alone (600 ms wall-clock loop decides whether drops happened)
